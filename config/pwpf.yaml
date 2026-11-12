@@ -62,6 +62,12 @@ mode:                        # stand-in for the human-edited WWD forecast
   min_snow_in: 0.01
   external: null             # path to a GRIB2/npz with deterministic 24-h snow (inches) if method=external
 
+calibration:                 # end-of-run report in the log: Northeast box statistics per model group + NWS reference points
+  enabled: true
+  windows: [s72_f072, s24_f030]
+  # box: {lat: [40, 47], lon: [-80, -67]}
+  # points: [[name, lat, lon, nws_72h_in], ...]   (defaults: pwpf_blender/calibration.py REFERENCE_POINTS)
+
 static:
   terrain: static/terrain_2p5km.npy          # made by `prepare-static`
   prism:   static/prism_ppt_monthly_2p5km.npy

@@ -286,6 +286,8 @@ class Pipeline:
                 cfg.get("min_members", 4), "; ".join(f"{x['id']}:{x['n_members']}" for x in res.skipped[:8])))
         if ice_on:
             self._fit_windows(res, specs, snow_bins, weights, avail, bin_h, ice=True, bins_ice=ice_bins)
+        from . import calibration
+        calibration.log_report(res, runs, avail, snow_bins, self._dst_lon, self._dst_lat, bin_h, cfg.get("calibration"))
         from . import noaa_http as _nh
         log.info("HTTP request budget:\n%s", _nh.STATS.report())
         n_full = int(avail.all(axis=1).sum())

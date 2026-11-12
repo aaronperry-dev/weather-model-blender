@@ -348,3 +348,22 @@ def test_ice_48h_mode_is_sum_of_24h_ice_modes(synthetic_run):
     I = res.ice
     if "s48_f048" in I and "s24_f024" in I and "s24_f048" in I:
         assert np.allclose(I["s48_f048"]["mode"], I["s24_f024"]["mode"] + I["s24_f048"]["mode"], atol=1e-4)
+
+
+def test_calibration_report_runs_on_a_synthetic_cycle(caplog):
+    """The calibration block (box statistics by model group + NWS reference points) is produced and never breaks a run."""
+    import logging
+    from pwpf_blender import calibration
+    from pwpf_blender.grid import GridSpec
+    from pwpf_blender.pipeline import Pipeline
+    from pwpf_blender.sources.synthetic import synthetic_prism, synthetic_terrain
+    cfg = load_config(CFG, "synthetic", {"grid": {"stride": 8}, "workers": 2})
+    grid = GridSpec.ndfd_2p5km(8)
+    lon, lat = grid.lonlat()
+    with caplog.at_level(logging.INFO):
+        Pipeline(cfg, grid, synthetic_terrain(lon, lat), synthetic_prism(lon, lat)).run(datetime(2026, 1, 15, 12))
+    txt = "\n".join(r.getMessage() for r in caplog.records)
+    assert "calibration report" in txt and "[s72_f072]" in txt and "BLEND (mode)" in txt
+    assert "Hunter NY" in txt and "mode / NWS" in txt
+    assert "calibration report failed" not in txt
+    assert calibration._window_bins("s24_f030", 6) == (1, 5) and calibration._window_bins("x", 6) is None

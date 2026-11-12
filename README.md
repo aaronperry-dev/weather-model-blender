@@ -107,7 +107,7 @@ All HTTP goes through one polite client (`noaa_http._request`), so no server's r
 | ECMWF open data | 500 simultaneous connections | ≤ 2 requests/s; `ecmwf-opendata` retries capped at 3 (library default is 500 × 120 s) |
 | PRISM | refuses a file downloaded twice within 24 h | one request every 2 s, one connection, files streamed to disk once, a ledger refuses to re-request a file inside 24 h, raw files cached between workflow runs |
 
-On `429`/`503` (and `403` from NCEP, whose firewall blocks over-limit IPs) it honours `Retry-After` or backs off
+On `429`/`503` (and `403` from NCEP, whose firewall blocks over-limit IPs; but see the availability probes below) it honours `Retry-After` or backs off
 exponentially with jitter; four consecutive throttles put a host on a 5-minute cool-down during which requests fail fast
 (callers fall back to another mirror or drop the member). A missing file (`404`) is never retried, matching the NWS
 guidance not to re-request a file that isn't published yet. Each file's `.idx` is fetched once per run, and the previous
@@ -233,11 +233,15 @@ vs model height and the factor applied. An optional hill-shade layer (same tiles
 ridges. Terrain data: Mapzen / AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1 and others); the attribution is added to
 the map when the layer is in use.
 
+### Calibration report
+Every run ends with a `=== calibration report ===` block in the log (`calibration:` in `config/pwpf.yaml`): for the 72-h period and the 24-h period ending 30 h after the cycle it prints, for a Northeast box, the percentage of area at or above 0.1/1/2/4/6/12 in plus mean, 99th percentile and maximum - for the blended mode, the blended 50th percentile, the plain member mean, and **each model group on its own** - and, for the 72-h period, our value at ~24 reference towns next to the NWS WFO "expected snowfall" labels read off the official maps (`pwpf_blender/calibration.py`; edit the list for another event). It shows at a glance whether the blend is high or low against the official forecasts and which model group drives it, before any SLR / mode / QPF knob is touched. The browser-side terrain adjustment is not included.
+
 ### Viewer behaviour
 * **Defaults:** Snowfall, "Forecast (mode)", terrain adjustment **on**, terrain shading **on** (URL hash `#...&k=prob&ta=0&sh=0` overrides). The map fills the window height; the ensemble-member table sits directly below it (link in the header).
 * **Cursor tooltip:** hovering shows the exact values under the pointer - the selected product, forecast mode, chance of exceeding the chosen threshold, 10/50/90th percentile, and (from zoom 5) ground elevation vs model terrain with the terrain factor - computed from the same interpolated field the map paints (`PWPFCore.sampleAt`). Click pins a point and fills the side-panel point forecast; on touch screens a tap shows the tooltip.
-* **Member freshness:** each model uses the **newest run that has started by the cycle** (`age_h: 0`; cycle `auto` = the newest 00/12Z cycle that has started). Before a run is used its last needed forecast hour must be published (NOAA/CMC/ECMWF inventories are probed); if not, the **previous run** is used, and then the one before it, and the member table notes the substitution. `PWPF_IFS_SOURCE`, the retry/back-off and the 45-min IFS budget are described under politeness above.
-* **Browser tests (optional):** `tests/test_browser.py` drives the real page in headless Chrome (`pip install playwright`, `npm i leaflet`, system Chrome); it is skipped when they are missing. It checks the defaults, that data is visible with and without terrain adjustment, the shading layer, the tooltip and the boundary layers.
+* **Member freshness:** each model uses the **newest run that has started by the cycle** (`age_h: 0`; cycle `auto` = the newest 00/12Z cycle that has started). Before a run is used its last needed forecast hour must be published (NOAA/CMC/ECMWF inventories are probed - a probe is one request, never retried: NOMADS answers **403** for a run directory that does not exist yet, which means "not published", not "throttled"); if not, the **previous run** is used, and then the one before it, and the member table notes the substitution. `PWPF_IFS_SOURCE`, the retry/back-off and the 45-min IFS budget are described under politeness above.
+* **Terrain toggle:** switching the adjustment (or the data) builds a *new* map layer beneath the old one and removes the old one when the new one has painted (or after 10 s), so the map never goes blank; elevation tiles are fetched with a timeout and two retries, and a tile whose elevation cannot be loaded is drawn un-adjusted instead of staying hidden. Painted tiles carry `data-adjusted="1"|"0"` for debugging.
+* **Browser tests (optional):** `tests/test_browser.py` drives the real page in headless Chrome (`pip install playwright`, `npm i leaflet`, system Chrome); it is skipped when they are missing. It checks the defaults, that data is visible with and without terrain adjustment, the adjustment off->on round trip, slow/failed/hung elevation tiles, the shading layer, the tooltip and the boundary layers.
 
 ## Performance
 Full 2.5 km grid (3.0 M points), synthetic 34-member run: ~75 s and ~3.6 GB peak RAM. Live runs are dominated by
