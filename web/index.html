@@ -16,7 +16,14 @@
 </header>
 
 <main>
-  <div id="map"></div>
+  <div id="left">
+    <div id="map"></div>
+    <section id="members" class="members">
+      <h2>Ensemble members used in this blend</h2>
+      <div id="membersSummary" class="muted small">loading…</div>
+      <div class="tablewrap"><table id="membersTable"></table></div>
+    </section>
+  </div>
 
   <aside id="panel">
     <section>
@@ -33,6 +40,7 @@
       <h2 class="sub">Ending</h2>
       <div id="ends" class="chips"></div>
       <div id="validity" class="muted"></div>
+      <div id="skipnote" class="warn small" hidden></div>
       <div id="nodata" class="muted" hidden>No freezing rain in any ensemble member for this period.</div>
     </section>
 

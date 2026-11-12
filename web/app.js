@@ -9,12 +9,13 @@
   var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function utc(iso) { return new Date(/(Z|[+-]\d\d:?\d\d)$/.test(iso) ? iso : iso + 'Z'); }   // naive ISO strings are UTC
   function fmtTime(iso) {
-    var d = new Date(iso);
+    var d = utc(iso);
     return d.getUTCDate() + ' ' + MON[d.getUTCMonth()] + ' ' + d.getUTCFullYear() + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + 'Z';
   }
   function fmtShort(iso) {
-    var d = new Date(iso);
+    var d = utc(iso);
     return DOW[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + MON[d.getUTCMonth()] + ' ' + pad(d.getUTCHours()) + 'Z';
   }
   function parseHash() {
@@ -40,6 +41,45 @@
     manifest.windows.forEach(function (w) { s[w.length_h] = 1; });
     return Object.keys(s).map(Number).sort(function (a, b) { return a - b; });
   }
+  var MODEL = { gefs: 'GEFS', gefs_mean: 'GEFS mean', ifs_ens: 'ECMWF IFS ENS', ifs_hres: 'ECMWF IFS HRES', gfs: 'GFS',
+                hrrr: 'HRRR', rrfs: 'RRFS', rrfs_ens: 'RRFS ensemble', syn_global: 'Synthetic global', syn_cam: 'Synthetic CAM' };
+  function modelName(g) { return MODEL[g] || g; }
+  function esc(t) { return String(t).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  function buildMembers() {
+    var rank = function (x) { return x.ok ? 2 : (x.bins_ok > 0 ? 1 : 0); };        // problems first, then by model
+    var ms = (manifest.members || []).map(function (x, i) { return [x, i]; }).sort(function (a, b) {
+      return rank(a[0]) - rank(b[0]) || a[1] - b[1]; }).map(function (p) { return p[0]; });
+    var sum = $('membersSummary'), tb = $('membersTable');
+    if (!ms.length) { $('members').hidden = true; return; }
+    var full = ms.filter(function (x) { return x.ok; }).length, part = ms.filter(function (x) { return !x.ok && x.bins_ok > 0; }).length;
+    var none = ms.length - full - part, bits = [];
+    sum.textContent = full + ' of ' + ms.length + ' members complete' + (part ? ' · ' + part + ' partial' : '') + (none ? ' · ' + none + ' missing' : '') +
+      '. Each period is blended from the members that delivered all of its data (weights renormalised); ensemble size per period is shown under the date chips.';
+    var html = '<tr><th>Model</th><th>Member</th><th>Run (UTC)</th><th title="6-h bins delivered, 0 to 72 h">Data</th><th>Status</th><th>Notes</th></tr>';
+    ms.forEach(function (x) {
+      var cov = '';
+      for (var i = 0; i < x.bins.length; i++) cov += '<i class="' + (x.bins[i] === '1' ? 'y' : '') + '" title="+' + i * 6 + '–' + (i + 1) * 6 + ' h"></i>';
+      var cls = x.ok ? 'ok' : (x.bins_ok > 0 ? 'part' : 'bad');
+      var txt = x.ok ? 'Used' : (x.bins_ok > 0 ? 'Partial (' + x.bins_ok + '/' + x.bins_total + ')' : 'Missing');
+      var note = x.error ? esc(x.error) : (x.fallback ? 'Uses ' + esc(modelName(x.fallback)) + ' beyond +' + x.max_fxx_h + ' h from run start' : '');
+      html += '<tr><td>' + esc(modelName(x.group)) + '</td><td>' + esc(x.member || 'det.') + '</td><td>' + fmtShort(x.init) +
+        '</td><td><span class="cov">' + cov + '</span></td><td class="st ' + cls + '">' + txt + '</td><td class="note">' + note + '</td></tr>';
+    });
+    tb.innerHTML = html;
+  }
+
+  function skipNote() {
+    var sk = manifest.windows_skipped || [], box = $('skipnote');
+    var t0 = utc(manifest.cycle).getTime();
+    var lab = sk.filter(function (x) { return /^s(\d+)_f(\d+)$/.test(x.id); }).map(function (x) {
+      var m = /^s(\d+)_f(\d+)$/.exec(x.id);
+      return m[1] + ' h ending ' + fmtShort(new Date(t0 + (+m[2]) * 3600000).toISOString());
+    });
+    box.hidden = !lab.length;
+    if (lab.length) box.textContent = 'Not available this run (too few members with complete data): ' + lab.join('; ') + '.';
+  }
+
   function hasIce() { return manifest.windows.some(function (w) { return !!w.ice_file; }); }
 
   /* Load (and cache) the decoded parameter image of window w for the active hazard; resolves null if the
@@ -86,7 +126,8 @@
 
   function redraw() {
     var w = curWin(), info = prodInfo();
-    $('validity').textContent = w.length_h + ' h total · valid ' + fmtTime(w.start) + ' → ' + fmtTime(w.end);
+    $('validity').textContent = w.length_h + ' h total · valid ' + fmtTime(w.start) + ' → ' + fmtTime(w.end) +
+      (w.n_members ? ' · ' + w.n_members + ' members' + (w.reduced ? ' (reduced ensemble, lower confidence)' : '') : '');
     $('thrLabel').textContent = state.prod === 'ice' ? 'Ice accretion at least' : 'Snowfall at least';
     drawLegend();
     loadLayer(w, state.prod).then(function (params) {
@@ -197,17 +238,69 @@
     manifest = m; mercator = m.mercator;
     parseHash();
     if (!state.win || !curWin()) state.win = m.windows[0].id;
-    $('runinfo').textContent = 'Cycle ' + fmtTime(m.cycle) + ' · ' + m.members_total + ' ensemble members · built ' + fmtTime(m.generated);
+    $('runinfo').textContent = 'Cycle ' + fmtTime(m.cycle) + ' · ' + m.members_total + ' ensemble members' +
+      (m.members_requested && m.members_requested !== m.members_total ? ' (of ' + m.members_requested + ' requested)' : '') + ' · built ' + fmtTime(m.generated);
     $('about').innerHTML = '<b>Notice.</b> ' + m.notice + ' Methodology: multi-model ensemble → QPF (PRISM-downscaled) × precipitation type × SLR → binormal fit (mode = ' +
       m.mode_method + ' forecast, variance from the ensemble). Freezing rain: simplified FRAM ice-to-liquid ratio.' +
-      (m.prism_downscale === false ? ' <b>PRISM QPF downscaling was not applied in this build.</b>' : '') + ' Basemap © OpenStreetMap contributors © CARTO. Model data: NOAA/NCEP, ECMWF open data (CC-BY-4.0).';
-    map = L.map('map', { zoomSnap: 0.25, minZoom: 3 }).fitBounds(m.bounds);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-      { attribution: '© OpenStreetMap contributors © CARTO', maxZoom: 10 }).addTo(map);
+      (m.prism_downscale === false ? ' <b>PRISM QPF downscaling was not applied in this build.</b>' : '') + ' Model data: NOAA/NCEP, ECMWF open data (CC-BY-4.0).';
+    map = L.map('map', { zoomSnap: 0.25, minZoom: 3, maxZoom: 12 }).fitBounds(m.bounds);
+    setupBasemap();
+    buildMembers(); skipNote();
     buildControls();
     map.on('mousemove', function (e) { readout(e.latlng); });
     map.on('click', function (e) { state.pt = e.latlng; readout(e.latlng); writeHash(); });
     redraw();
+  }
+
+  /* Keyless basemaps (Carto's free tiles now need an API key).  If the active one produces only errors the
+     next one is switched on automatically; the layer control lets the user pick. */
+  var BASES = [
+    { name: 'Light gray (Esri)', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+      labels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+      attr: 'Basemap © Esri, HERE, Garmin, OpenStreetMap contributors', native: 16 },
+    { name: 'OpenStreetMap', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', attr: '© OpenStreetMap contributors', native: 19 },
+    { name: 'USGS Topo', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
+      attr: 'Basemap courtesy of the U.S. Geological Survey', native: 16 }
+  ];
+  function setupBasemap() {
+    map.createPane('labels'); map.getPane('labels').style.zIndex = 450; map.getPane('labels').style.pointerEvents = 'none';
+    var layers = {}, active = 0, refLayers = [], notice = null;
+    BASES.forEach(function (b, i) {
+      var t = L.tileLayer(b.url, { attribution: b.attr, maxNativeZoom: b.native, maxZoom: 12 });
+      t._st = { ok: 0, err: 0 };
+      t.on('tileload', function () { t._st.ok++; });
+      t.on('tileerror', function () {
+        t._st.err++;
+        if (t._st.ok === 0 && t._st.err >= 4 && i === active && i + 1 < BASES.length) switchTo(i + 1, true);
+      });
+      layers[b.name] = t;
+      refLayers[i] = b.labels ? L.tileLayer(b.labels, { pane: 'labels', maxNativeZoom: b.native, maxZoom: 12 }) : null;
+    });
+    function show(i) {
+      BASES.forEach(function (b, j) {
+        var t = layers[b.name];
+        if (j !== i && map.hasLayer(t)) map.removeLayer(t);
+        if (j !== i && refLayers[j] && map.hasLayer(refLayers[j])) map.removeLayer(refLayers[j]);
+      });
+      layers[BASES[i].name].addTo(map);
+      if (refLayers[i]) refLayers[i].addTo(map);
+      active = i;
+    }
+    function switchTo(i, auto) {
+      show(i);
+      if (auto && !notice) {
+        notice = document.createElement('div'); notice.className = 'basemsg';
+        notice.textContent = 'Basemap unavailable; switched to ' + BASES[i].name + '.';
+        map.getContainer().appendChild(notice);
+        setTimeout(function () { if (notice && notice.parentNode) notice.parentNode.removeChild(notice); notice = null; }, 6000);
+      }
+    }
+    show(0);
+    var ctl = L.control.layers(layers, null, { position: 'topright', collapsed: true }).addTo(map);
+    map.on('baselayerchange', function (e) {
+      BASES.forEach(function (b, j) { if (layers[b.name] === e.layer) { active = j; } });
+      BASES.forEach(function (b, j) { if (refLayers[j]) { if (j === active) refLayers[j].addTo(map); else map.removeLayer(refLayers[j]); } });
+    });
   }
 
   fetch(DATA + 'manifest.json', { cache: 'no-cache' }).then(function (r) { return r.json(); }).then(init)

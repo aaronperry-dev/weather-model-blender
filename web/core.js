@@ -5,10 +5,14 @@
 })(typeof self !== 'undefined' ? self : this, function (Binormal) {
   'use strict';
 
+  /* Probabilities: ColorBrewer sequential YlGnBu (9 classes), one class per 10 % step from 10 %. */
   var PROB_STOPS = [10, 20, 30, 40, 50, 60, 70, 80, 90];
-  var PROB_COLORS = ['#cfe8f3', '#93cfe6', '#5fb5e0', '#3b8fd6', '#4f6fc9', '#7a4fba', '#a63fa8', '#cf3c86', '#e8505b'];
-  var SNOW_STOPS = [0.1, 1, 2, 3, 4, 6, 8, 12, 18, 24, 30, 36, 48];
-  var SNOW_COLORS = ['#d6ecf9', '#a7d3f0', '#74b4e6', '#4a92d9', '#2f6fc6', '#3a4cb5', '#6b3fae', '#8e2c9f', '#b02a86', '#cf3d63', '#e8622f', '#f59b25', '#fbd24a'];
+  var PROB_COLORS = ['#ffffd9', '#edf8b1', '#c7e9b4', '#7fcdbb', '#41b6c4', '#1d91c0', '#225ea8', '#253494', '#081d58'];
+  /* Snowfall amounts: the NWS "Expected Snowfall" ramp (colours sampled from the official legend); each colour
+     starts at its stop, e.g. 6-8 in = pale yellow, 72+ in = purple. */
+  var SNOW_STOPS = [0.1, 1, 2, 3, 4, 6, 8, 12, 18, 24, 30, 36, 48, 60, 72];
+  var SNOW_COLORS = ['#bdd7e7', '#6baed6', '#3182bd', '#005199', '#002694', '#ffff96', '#ffc400', '#ff8700',
+                     '#db1400', '#9e0000', '#690000', '#360000', '#ccccff', '#9f8cd8', '#7c52a5'];
 
   var ICE_STOPS = [0.01, 0.05, 0.1, 0.15, 0.25, 0.4, 0.5, 0.75, 1.0];
   var ICE_COLORS = ['#ffe3ef', '#ffc2da', '#ff9ec3', '#f46fa8', '#d6408f', '#b0237a', '#8a1a6e', '#5f1360', '#3a0d4a'];
