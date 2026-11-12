@@ -80,23 +80,25 @@ web:
     hillshade: true
 
 # ---- ensemble members -----------------------------------------------------------------------
-# run_hours/age_h/lags_h choose the model initialisation for a cycle:  latest run hour <= cycle - age_h,
-# then optionally earlier time-lagged runs (cycle - age_h - lag).  max_fxx_h: beyond that lead time,
+# run_hours/age_h/lags_h choose the model initialisation for a cycle:  the newest run hour <= cycle - age_h (age_h 0:
+# the newest run that started by the cycle), then optionally earlier time-lagged runs (cycle - age_h - lag).  Before a
+# run is used, its last needed forecast hour must be published; if not the previous run is used instead (and the one
+# before that), and the member table says so.  Cycle 'auto' = the newest 00/12Z cycle that has started.  max_fxx_h: beyond that lead time,
 # bins fall back to the `fallback` group (like PWPF's "time-lagged GFS/GEFS for Days 1.5-3").
 members:
-  - {name: gefs,      loader: gefs,       count: 10, pool: 30, pick: random, run_hours: [0,6,12,18], age_h: 6,  max_fxx_h: 240, weight: 1}
-  - {name: ifs_ens,   loader: ifs_ens,    count: 25, pool: 50, pick: random, run_hours: [0,12],      age_h: 12, max_fxx_h: 144, weight: 1}
-  - {name: cmce,      loader: cmce,       count: 10, pool: 20, pick: first, run_hours: [0,12],      age_h: 6,  max_fxx_h: 192, weight: 1}
-  - {name: rdps,      loader: rdps,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 4,  max_fxx_h: 84,  fallback: gfs, weight: 1}
-  - {name: gefs_mean, loader: gefs,       members: [avg],                    run_hours: [0,6,12,18], age_h: 6,  max_fxx_h: 240, weight: 1}
+  - {name: gefs,      loader: gefs,       count: 10, pool: 30, pick: random, run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 240, weight: 1}
+  - {name: ifs_ens,   loader: ifs_ens,    count: 25, pool: 50, pick: random, run_hours: [0,12],      age_h: 0, max_fxx_h: 144, weight: 1}
+  - {name: cmce,      loader: cmce,       count: 10, pool: 20, pick: first, run_hours: [0,12],      age_h: 0,  max_fxx_h: 192, weight: 1}
+  - {name: rdps,      loader: rdps,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 84,  fallback: gfs, weight: 1}
+  - {name: gefs_mean, loader: gefs,       members: [avg],                    run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 240, weight: 1}
   - {name: gfs,       loader: gfs,        members: [null],                   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 384, weight: 1}
-  - {name: ifs_hres,  loader: ifs_hres,   members: [null],                   run_hours: [0,12],      age_h: 12, max_fxx_h: 144, weight: 1}
+  - {name: ifs_hres,  loader: ifs_hres,   members: [null],                   run_hours: [0,12],      age_h: 0, max_fxx_h: 144, weight: 1}
   - {name: hrrr,      loader: hrrr,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 36,  fallback: gfs, weight: 1}
   - {name: rrfs,      loader: rrfs,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 84,  fallback: gfs, weight: 1}
   - {name: rrfs_ens,  loader: rrfs_ens,   members: [1,2,3,4,5], lags_h: [0, 6], run_hours: [0,6,12,18], age_h: 0, max_fxx_h: 60,  fallback: gefs, weight: 1}
 
 # Available but not in WPC's list, so off by default: add this line to `members` to include the 15 km Canadian global.
-#   - {name: gdps, loader: gdps, members: [null], run_hours: [0,12], age_h: 6, max_fxx_h: 240, weight: 1}
+#   - {name: gdps, loader: gdps, members: [null], run_hours: [0,12], age_h: 0, max_fxx_h: 240, weight: 1}
 # (HRDPS, the 2.5 km Canadian model on dd.weather.gc.ca/model_hrdps/continental, covers only southern Canada and the
 #  northern US, so it cannot supply a CONUS-wide blend and has no loader.)
 not_implemented: []          # members in WPC's list that have no loader here yet

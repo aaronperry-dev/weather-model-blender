@@ -332,6 +332,29 @@ class IfsSource(Source):
         self._span: tuple[datetime, datetime] | None = None
         self._dl_locks: dict[str, threading.Lock] = {}
 
+    def available(self, init, fxx, member) -> bool:
+        """Is forecast hour `fxx` of this run published?  The bucket's `.index` of that step's file is written with the
+        file, so one 1-byte ranged GET says so.  Only a definite 404 on every mirror tried answers "no": a throttled or
+        unreachable mirror proves nothing, and we must not drop a whole run because of it."""
+        try:
+            from ecmwf.opendata import Client
+        except ImportError:                                                  # pragma: no cover
+            return True
+        kw = dict(date=init.strftime("%Y%m%d"), time=init.hour, step=[int(fxx)], levtype="sfc", param=["tp"])
+        kw.update(dict(stream="enfo", type="pf", number=[int(member)]) if self.ensemble else dict(stream="oper", type="fc"))
+        missing = False
+        for mirror in [self.source] + [m for m in self.MIRRORS if m != self.source][:1]:
+            try:
+                urls = Client(source=mirror)._get_urls(None, use_index=False, target="probe", **kw).urls
+                for u in urls:
+                    r = nh._request(str(u).rsplit(".", 1)[0] + ".index", headers={"Range": "bytes=0-0"})
+                    if r.status_code in (200, 206):
+                        return True
+                    missing = missing or r.status_code == 404
+            except Exception as e:                                           # noqa: BLE001 - unknown, not "missing"
+                log.debug("%s availability probe on %s: %s", self.name, mirror, e)
+        return not missing
+
     def set_span(self, start: datetime, end: datetime) -> None:
         """Valid-time span the whole run will need.  With it each member's file is fetched once for the span
         instead of once per 6-h bin (which re-downloaded the boundary steps and ~2.7x the bytes)."""

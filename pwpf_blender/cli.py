@@ -20,7 +20,7 @@ from .pipeline import Pipeline, window_specs
 def _parse_cycle(s: str, cfg: dict) -> datetime:
     if s != "auto":
         return datetime.fromisoformat(s).replace(tzinfo=None, minute=0, second=0, microsecond=0)
-    now = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=3)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)      # newest cycle that has started; models fall back per member
     for back in range(0, 48):
         c = (now - timedelta(hours=back)).replace(minute=0, second=0, microsecond=0)
         if c.hour in cfg.get("cycle_hours", [0, 12]):
