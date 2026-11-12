@@ -46,7 +46,7 @@ jobs:
           if [ "$PROFILE" != "synthetic" ]; then pip install -r requirements-live.txt; fi
 
       - name: Unit tests
-        run: pip install pytest && pytest -q
+        run: pip install pytest && python -m pytest -q
 
       - name: Restore static inputs (terrain + PRISM normals)
         id: static

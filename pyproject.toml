@@ -18,3 +18,4 @@ packages = ["pwpf_blender", "pwpf_blender.sources"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
