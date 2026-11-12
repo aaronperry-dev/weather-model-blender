@@ -242,6 +242,36 @@ def test_qpf_bucket_resets_gfs_gefs_style():
     assert float(s._qpf_step(INIT, 12, None)[0, 0]) == pytest.approx(1.75)   # 6.0 - 4.25
 
 
+class DayFakeSource(FakeSource):
+    """Like FakeSource but labels whole-day totals the way wgrib2 does ("0-1 day acc fcst")."""
+
+    def _fetch(self, init, fxx, member, apcp_only=False):
+        self.calls += 1
+        out = {}
+        for (a, b), v in self.table.get(fxx, {}).items():
+            lab = f"{a // 24}-{b // 24} day acc fcst" if a % 24 == 0 and b % 24 == 0 and b > a else f"{a}-{b} hour acc fcst"
+            out[("APCP", "surface", lab)] = np.full((2, 2), v, np.float32)
+        return out
+
+
+def test_acc_intervals_understand_day_units():
+    f = {("APCP", "surface", "0-1 day acc fcst"): 1, ("APCP", "surface", "23-24 hour acc fcst"): 2,
+         ("APCP", "surface", "0-2 day acc fcst"): 3, ("APCP", "surface", "0-21 hour acc fcst"): 4}
+    assert set(nh.acc_intervals(f)) == {(0, 24), (23, 24), (0, 48), (0, 21)}
+
+
+def test_qpf_step_ending_at_24h_uses_the_day_total():
+    """HRRR/RRFS f24: only 'APCP 23-24 hour' and 'APCP 0-1 day' exist -> 3-h amount = total(24) - total(21).
+    (This is the case that dropped every HRRR/RRFS member from the 12Z 11 Nov build.)"""
+    s = DayFakeSource({21: {(20, 21): 0.2, (0, 21): 6.0}, 24: {(23, 24): 0.1, (0, 24): 7.5}})
+    assert float(s._qpf_step(INIT, 24, None)[0, 0]) == pytest.approx(1.5)
+
+
+def test_qpf_falls_back_to_summing_hourly_records():
+    s = FakeSource({22: {(21, 22): 0.5}, 23: {(22, 23): 0.25}, 24: {(23, 24): 0.125}, 21: {}})
+    assert float(s._qpf_step(INIT, 24, None)[0, 0]) == pytest.approx(0.875)
+
+
 def test_qpf_missing_raises_with_inventory():
     s = FakeSource({6: {(0, 6): 3.0}, 3: {}})
     with pytest.raises(nh.FetchError) as e:

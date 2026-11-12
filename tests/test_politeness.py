@@ -60,7 +60,7 @@ def test_policies_match_published_limits(monkeypatch):
     assert prism is nh.policy_for("https://services.nacse.org/x") and prism.max_conc == 1 and prism.rate <= 0.5
     a = nh.policy_for("https://noaa-gefs-pds.s3.amazonaws.com/a")
     b = nh.policy_for("https://noaa-gfs-bdp-pds.s3.amazonaws.com/a")
-    assert a is not b and a.rate <= 10 and a.max_conc <= 4        # per bucket
+    assert a is not b and a.rate <= 20 and a.max_conc <= 6        # per bucket (S3 allows thousands of GETs/s per prefix)
     assert 403 not in a.throttle_codes                            # S3 403 = forbidden, not "slow down"
 
 
@@ -319,5 +319,5 @@ def test_ifs_client_retries_are_capped(tmp_path, monkeypatch):
     monkeypatch.setattr(eo, "Client", FakeClient)
     src = IfsSource("ifs_ens", True, source="aws", save_dir=tmp_path)
     src._retrieve(datetime(2026, 1, 15, 0), [6, 12], 3, "sfc")
-    assert seen["maximum_retries"] == 3 and seen["retry_after"] == 60          # library default is 500 x 120 s
+    assert seen["maximum_retries"] == 5 and seen["retry_after"] == 20          # library default is 500 x 120 s
     assert "ecmwf-forecasts" in next(iter(nh._policies)) or any("amazonaws" in k for k in nh._policies)

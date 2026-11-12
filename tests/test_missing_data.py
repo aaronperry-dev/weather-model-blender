@@ -103,3 +103,46 @@ def test_one_bad_bin_in_the_middle_only_costs_the_windows_that_include_it(monkey
     assert n["s24_f024"] == n["s24_f030"] == n["s24_f036"] == n["s24_f042"] == 33
     assert n["s48_f048"] == n["s72_f072"] == 33
     assert n["s24_f048"] == n["s24_f054"] == n["s24_f072"] == 34       # these start at/after +24 h: unaffected
+
+
+# ---------------------------------------------------------------- unpublished newest run -> previous run
+class _Probe:
+    """Stand-in source: only runs listed in `ready` (init, last published fxx) have data."""
+    step_hours, native_ptype = 3, False
+
+    def __init__(self, ready):
+        self.ready, self.asked = ready, []
+
+    def available(self, init, fxx, member):
+        self.asked.append((init, fxx))
+        return self.ready.get(init, -1) >= fxx
+
+
+def test_incomplete_newest_run_steps_back_one_run(monkeypatch):
+    from pwpf_blender import pipeline as pl
+    cfg = {"members": [{"name": "gfs", "loader": "x", "members": [None], "run_hours": [0, 6, 12, 18], "age_h": 0,
+                        "max_fxx_h": 384, "weight": 1}]}
+    cycle = datetime(2026, 11, 12, 0)
+    src = _Probe({datetime(2026, 11, 12, 0): 30, datetime(2026, 11, 11, 18): 120})   # 00Z only out to f030
+    monkeypatch.setattr(pl, "make_source", lambda name: src)
+    runs = pl.expand_members(cfg, cycle, need_h=72)
+    assert [r.init for r in runs] == [datetime(2026, 11, 11, 18)]
+    assert (datetime(2026, 11, 12, 0), 72) in src.asked and (datetime(2026, 11, 11, 18), 78) in src.asked
+    assert "00Z run not fully published" in runs[0].note
+
+
+def test_lagged_group_does_not_duplicate_runs_and_complete_run_is_kept(monkeypatch):
+    from pwpf_blender import pipeline as pl
+    cfg = {"members": [{"name": "hrrr", "loader": "x", "members": [None], "lags_h": [0, 6],
+                        "run_hours": [0, 6, 12, 18], "age_h": 0, "max_fxx_h": 36, "weight": 1}]}
+    cycle = datetime(2026, 11, 12, 0)
+    # newest (00Z) not out yet; 18Z and 12Z complete -> 00Z request falls back to 18Z, the 6 h lag (18Z) moves to 12Z
+    src = _Probe({datetime(2026, 11, 11, 18): 48, datetime(2026, 11, 11, 12): 48})
+    monkeypatch.setattr(pl, "make_source", lambda name: src)
+    runs = pl.expand_members(cfg, cycle, need_h=72)
+    assert sorted(r.init for r in runs) == [datetime(2026, 11, 11, 12), datetime(2026, 11, 11, 18)]
+    src2 = _Probe({datetime(2026, 11, 12, 0): 48, datetime(2026, 11, 11, 18): 48})
+    monkeypatch.setattr(pl, "make_source", lambda name: src2)
+    runs = pl.expand_members(cfg, cycle, need_h=72)
+    assert sorted(r.init for r in runs) == [datetime(2026, 11, 11, 18), datetime(2026, 11, 12, 0)]
+    assert all(not r.note for r in runs)
