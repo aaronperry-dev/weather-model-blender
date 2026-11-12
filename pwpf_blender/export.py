@@ -137,6 +137,7 @@ def write_site(results, cfg: dict, outdir: str | Path) -> Path:
         "mode_method": cfg.get("mode", {}).get("method", "pmm"),
         "slr": cfg.get("slr", {}),
         "grid_stride": results.grid.stride,
+        "prism_downscale": bool(results.meta.get("prism_downscale", False)),
         "notice": "Unofficial guidance built from public WPC PWPF documentation. Not a National Weather Service product.",
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))

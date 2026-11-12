@@ -76,8 +76,9 @@ def cmd_run(a):
 
 def cmd_prepare(a):
     from .static_data import PRISM_URL, prepare_static
-    t, p = prepare_static(a.out, a.terrain_npy, a.prism_dir, a.prism_url or PRISM_URL, skip_existing=not a.force)
-    print("static ready:", t, p)
+    t, p = prepare_static(a.out, a.terrain_npy, a.prism_dir, a.prism_url or PRISM_URL, skip_existing=not a.force,
+                          require_prism=a.require_prism)
+    print("static ready:", t, p if p else "(no PRISM: QPF downscaling will be off)")
 
 
 def cmd_diagnose(a):
@@ -138,7 +139,8 @@ def main(argv=None):
     s.add_argument("--out", default="static")
     s.add_argument("--terrain-npy", default=None)
     s.add_argument("--prism-dir", default=None)
-    s.add_argument("--prism-url", default=None)
+    s.add_argument("--prism-url", default=None, help="normals directory listing URL (or a template with {mm})")
+    s.add_argument("--require-prism", action="store_true", help="fail instead of continuing without PRISM")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_prepare)
     d = sub.add_parser("diagnose", help="check every live data feed (AWS/NOMADS inventories) and print the result")
