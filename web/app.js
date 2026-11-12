@@ -199,7 +199,8 @@
     if (!state.win || !curWin()) state.win = m.windows[0].id;
     $('runinfo').textContent = 'Cycle ' + fmtTime(m.cycle) + ' · ' + m.members_total + ' ensemble members · built ' + fmtTime(m.generated);
     $('about').innerHTML = '<b>Notice.</b> ' + m.notice + ' Methodology: multi-model ensemble → QPF (PRISM-downscaled) × precipitation type × SLR → binormal fit (mode = ' +
-      m.mode_method + ' forecast, variance from the ensemble). Freezing rain: simplified FRAM ice-to-liquid ratio. Basemap © OpenStreetMap contributors © CARTO. Model data: NOAA/NCEP, ECMWF open data (CC-BY-4.0).';
+      m.mode_method + ' forecast, variance from the ensemble). Freezing rain: simplified FRAM ice-to-liquid ratio.' +
+      (m.prism_downscale === false ? ' <b>PRISM QPF downscaling was not applied in this build.</b>' : '') + ' Basemap © OpenStreetMap contributors © CARTO. Model data: NOAA/NCEP, ECMWF open data (CC-BY-4.0).';
     map = L.map('map', { zoomSnap: 0.25, minZoom: 3 }).fitBounds(m.bounds);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
       { attribution: '© OpenStreetMap contributors © CARTO', maxZoom: 10 }).addTo(map);
