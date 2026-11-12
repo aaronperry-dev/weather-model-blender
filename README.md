@@ -27,7 +27,7 @@ From WPC's "About PWPF Products" page and the 2.5 km file README:
 
 | PWPF step (public documentation) | Here | Status |
 |---|---|---|
-| ~60 member multi-model ensemble: 10 GEFS, 25 ECMWF ENS, 10 CMC ENS, 2 HRRR, 2 CMC RDPS, GFS, ECMWF HRES, GEFS mean, plus (until Nov 2026) SREF, 2 NAM-nest, 4 HiResW ARW, FV3-LAM | `config/pwpf.yaml` groups with the same init-time logic (`age_h`, `lags_h`), seeded random member picks, and PWPF-style fall-back to time-lagged GFS/GEFS beyond a CAM's range. **NAM, NAM-nest, HiResW, HREF and SREF were retired on 2026-11-03** (NWS SCN 26-47/48); their CAM role is filled by **RRFS** (deterministic + 5-member ensemble, 3 km) and HRRR, the members NCEP itself combines into REFS | **Implemented** except CMC GEPS/RDPS (no loader yet). WPC hasn't published its post-transition constituent list, so the CAM part is the closest public analogue |
+| ~60 member multi-model ensemble: 10 GEFS, 25 ECMWF ENS, 10 CMC ENS, 2 HRRR, 2 CMC RDPS, GFS, ECMWF HRES, GEFS mean, plus (until Nov 2026) SREF, 2 NAM-nest, 4 HiResW ARW, FV3-LAM | `config/pwpf.yaml` groups with the same init-time logic (`age_h`, `lags_h`), seeded random member picks, and PWPF-style fall-back to time-lagged GFS/GEFS beyond a CAM's range. **NAM, NAM-nest, HiResW, HREF and SREF were retired on 2026-11-03** (NWS SCN 26-47/48); their CAM role is filled by **RRFS** (deterministic + 5-member ensemble, 3 km) and HRRR, the members NCEP itself combines into REFS | **Implemented**; CMC RDPS comes from the MSC Datamart (`dd.weather.gc.ca`), CMC GEPS comes from NCEP's NAEFS copy on NOMADS via the grib filter. WPC hasn't published its post-transition constituent list, so the CAM part is the closest public analogue |
 | PRISM-based QPF downscaling of every member | `downscale.py`: ratio of PRISM monthly normals to the same field smoothed to the member's resolution | **Implemented** (ratio clip limits are our assumption) |
 | Snow level = height of the 0.5 °C wet-bulb surface, top-down search, intersected with RTMA terrain; terrain above it ⇒ snow | `thermo.py` (Stull wet-bulb, top-down crossing) + RTMA 2.5 km terrain | **Implemented** |
 | Precip type: NCEP models use dominant-type (Manikin 2005); non-NCEP use a simple decision tree on T2m and T925/850/700 | `ptype.py`: dominant type from native categorical fields; decision tree otherwise | **Implemented** (tree thresholds / tie order are our assumptions) |
@@ -78,6 +78,8 @@ text, so there is no cfgrib/eccodes short-name guessing. AWS Open Data is tried 
 | `hrrr` | `noaa-hrrr-bdp-pds` | `hrrr.YYYYMMDD/conus/hrrr.tHHz.wrf{sfc,prs}fFF.grib2` |
 | `rrfs` | `noaa-rrfs-ops-pds` / NOMADS `rrfs/prod` | `rrfs.YYYYMMDD/HH/rrfs.tHHz.{2dfld,prslev}.3km.fFFF.conus.grib2` |
 | `rrfs_ens` | same | `rrfsens.YYYYMMDD/HH/mNNN/rrfs.tHHz.mNNN.{2dfldnomads,prslevnomads}.3km.fFFF.conus.grib2` |
+| `rdps` / `gdps` | MSC Datamart `dd.weather.gc.ca/{date}/WXO-DD/model_rdps/10km` (RDPS, 10 km) and `model_gdps/15km` (GDPS, 0.15°; registered, off by default). One small GRIB2 per variable x level x hour (19 files/step), no `.idx` | decoded with eccodes; 2 req/s, 2 parallel (no published limit); height/RH/T/pressure units auto-detected. HRDPS 2.5 km is not used (covers only southern Canada / northern US) |
+| `cmce` | NOMADS `naefs/prod/cmce.*` (CMC GEPS, 0.5°), via the NOMADS grib filter (server-side subsetting, ~2 requests per step) | decoded with eccodes; NCEP rate rules apply |
 | `ifs_ens`, `ifs_hres` | ECMWF open data (`ecmwf-opendata`, default AWS mirror) | decoded with eccodes |
 | terrain | RTMA 2.5 km `rtma2p5.tHHz.2dvaranl_ndfd.grb2_wexp` (fallback: RRFS `HGT:surface`) | `prepare-static` |
 
@@ -201,7 +203,7 @@ the page footer); PRISM normals are free to use but check their terms before red
 publishes them). Basemap © OpenStreetMap contributors © CARTO.
 
 ## Roadmap
-CMC GEPS/RDPS and SREF loaders · NBM SLR / snow-level percentiles as optional inputs · ice (freezing-rain) products
+SREF loader · NBM SLR / snow-level percentiles as optional inputs · ice (freezing-rain) products
 using the simplified FRAM ILR · per-pixel NaN handling at CAM domain edges · automatic WPC-file download in `validate`.
 
 
