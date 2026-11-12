@@ -167,6 +167,15 @@ class Limiter:
             self._sleep(wait)
         return wait
 
+    def penalise(self, seconds: float, max_debt_s: float = 60.0) -> None:
+        """The server pushed back: owe it `seconds` of silence.  Every thread sharing this bucket waits (the debt is
+        in tokens), without any of them having to know about the others.  Debt never exceeds `max_debt_s`."""
+        with self._lock:
+            now = self._clock()
+            self._tokens = min(self.burst, self._tokens + (now - self._t) * self.rate)
+            self._t = now
+            self._tokens = max(self._tokens - seconds * self.rate, -max_debt_s * self.rate)
+
 
 @dataclass
 class Policy:
@@ -200,7 +209,7 @@ def policy_for(url: str) -> Policy:
     elif host == "dd.weather.gc.ca":                  # MSC Datamart (no published rate limit): stay modest
         key, mk = "msc", lambda: Policy("msc", 2.0, 4, 2)
     elif host.startswith("ecmwf-forecasts.s3"):       # ECMWF open-data mirror: answered 503 under 4 parallel pulls
-        key, mk = host, lambda: Policy(host, 3.0, 6, 2)
+        key, mk = host, lambda: Policy(host, 4.0, 8, 2)
     elif host.startswith("noaa-") and host.endswith(".amazonaws.com"):     # NOAA open-data buckets
         key, mk = host, lambda: Policy(host, 20.0, 40, 6)
     elif host.endswith(".amazonaws.com"):
@@ -337,6 +346,31 @@ def _request(url: str, headers=None, stream: bool = False, timeout=None):
             STATS.add(pol.key, bytes=len(r.content))
         return r
     raise FetchError(f"{url}: gave up after {RETRIES + 1} attempts (last: {last})")
+
+
+THROTTLE_PENALTY_S = 15.0                # shared pause after one throttle answer to a client that makes its own requests
+
+
+def mount_polite(session) -> None:
+    """Route every request of a `requests` session (e.g. the one inside the ecmwf-opendata client, whose downloader
+    issues one ranged GET per GRIB message) through the host's rate limit.  Each real request waits for a token
+    and is counted in STATS; a 429/503 answer makes *all* threads of that host pause (`Limiter.penalise`), on top
+    of the library's own retry sleep."""
+    from requests.adapters import HTTPAdapter
+
+    class PoliteAdapter(HTTPAdapter):
+        def send(self, request, **kw):
+            pol = policy_for(request.url)
+            w = pol.limiter.acquire()
+            STATS.add(pol.key, requests=1, waited_s=w)
+            resp = super().send(request, **kw)
+            if resp.status_code in pol.throttle_codes:
+                STATS.add(pol.key, throttled=1)
+                pol.limiter.penalise(THROTTLE_PENALTY_S)
+            return resp
+
+    for scheme in ("https://", "http://"):
+        session.mount(scheme, PoliteAdapter(max_retries=0, pool_maxsize=8))
 
 
 def _get(url: str, headers=None):
