@@ -3,7 +3,7 @@
   'use strict';
   var DATA = 'data/';
   var state = { win: null, prod: 'snow', kind: 'mode', thr: null, pct: 50, pt: null, adj: true, shade: true };
-  var manifest, map, overlay, shadeLayer, cache = {}, cacheOrder = [], current = null, mercator, zref = null, zrefP = null;
+  var manifest, map, overlay, shown, shadeLayer, cache = {}, cacheOrder = [], current = null, mercator, zref = null, zrefP = null;
 
   function $(id) { return document.getElementById(id); }
   var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -119,21 +119,34 @@
       cx.drawImage(bmp, 0, 0);
       return cx.getImageData(0, 0, 256, 256).data;
     }
+    var ms = window.__pwpfDemTimeoutMs || 20000;       // a request that never answers must fail, not leave its map tile hidden
     if (window.createImageBitmap) {                     // no colour conversion / premultiplication: the PNG holds data
-      return fetch(url, { mode: 'cors' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
-        .then(function (b) { return createImageBitmap(b, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }); }).then(fromBitmap);
+      var ctl = window.AbortController ? new AbortController() : null, timer = ctl ? setTimeout(function () { ctl.abort(); }, ms) : null;
+      return fetch(url, { mode: 'cors', signal: ctl ? ctl.signal : undefined })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+        .then(function (b) { return createImageBitmap(b, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }); })
+        .then(function (bmp) { clearTimeout(timer); return fromBitmap(bmp); }, function (e) { clearTimeout(timer); throw e; });
     }
     return new Promise(function (resolve, reject) {
-      var img = new Image(); img.crossOrigin = 'anonymous';
-      img.onload = function () { resolve(fromBitmap(img)); };
-      img.onerror = function () { reject(new Error('terrain tile failed')); };
+      var img = new Image(), timer = setTimeout(function () { img.src = ''; reject(new Error('terrain tile timed out')); }, ms);
+      img.crossOrigin = 'anonymous';
+      img.onload = function () { clearTimeout(timer); resolve(fromBitmap(img)); };
+      img.onerror = function () { clearTimeout(timer); reject(new Error('terrain tile failed')); };
       img.src = url;
     });
+  }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function pixelsWithRetry(url) {                      // transient errors (503 SlowDown, dropped connections) get two more tries
+    var tries = [0, 500, 1500];
+    function go(i) {
+      return wait(tries[i]).then(function () { return pixelsOf(url); }).catch(function (e) { if (i + 1 < tries.length) return go(i + 1); throw e; });
+    }
+    return go(0);
   }
   function demTile(z, x, y) {
     if (!demCache) demCache = new PWPFTerrain.TileCache(function (zz, xx, yy) {
       var url = manifest.terrain.dem_url.replace('{z}', zz).replace('{x}', xx).replace('{y}', yy);
-      return pixelsOf(url).then(function (px) { demOk++; return PWPFTerrain.decodeTerrarium(px, 65536); },
+      return pixelsWithRetry(url).then(function (px) { demOk++; return PWPFTerrain.decodeTerrarium(px, 65536); },
                                 function (e) { demFails++; throw e; });
     }, 220);
     return demCache.get(z, x, y);
@@ -174,28 +187,39 @@
     $('legend').innerHTML = html;
   }
 
-  function clearOverlay() { if (overlay) { map.removeLayer(overlay); overlay = null; } }
+  function clearOverlay() { [overlay, shown].forEach(function (l) { if (l) map.removeLayer(l); }); overlay = shown = null; }
 
   /* The data layer: map tiles coloured per screen pixel in the browser (PWPFCore.renderTile) from the interpolated
      parameters, with the terrain adjustment where the elevation tiles are available. */
   var DataLayer = L.GridLayer.extend({
     options: { pane: 'overlayPane', tileSize: 256, updateWhenZooming: false, keepBuffer: 1, noWrap: true },
-    setData: function (params, product, pal) { this._params = params; this._product = product; this._pal = pal; this.redraw(); },
+    /* `adjust` is fixed for the life of the layer (a toggle builds a new layer, see setField), so a tile never has to
+       guess which variant it belongs to. */
+    setData: function (params, product, pal, adjust) { this._params = params; this._product = product; this._pal = pal; this._adjust = !!adjust; },
     createTile: function (coords, done) {
-      var self = this, size = this.getTileSize().x, sc = this.options.scale, n = size * sc;
+      var self = this, size = this.getTileSize().x, sc = this.options.scale, n = size * sc, finished = false;
       var c = L.DomUtil.create('canvas', 'leaflet-tile');
       c.width = c.height = n;
-      function finish() { setTimeout(function () { done(null, c); }, 0); }   // Leaflet ignores a done() called before createTile returns: the tile would stay hidden
+      /* Leaflet ignores a done() called before createTile returns (the tile would stay hidden), and a tile that never calls
+         it stays hidden forever: so done() is always called, once, asynchronously - whatever happens while painting. */
+      function finish() { if (finished) return; finished = true; setTimeout(function () { done(null, c); }, 0); }
+      function draw(dem) {
+        var rgba = PWPFCore.renderTile({ params: self._params, merc: manifest.mercator, pal: self._pal, product: self._product,
+          alpha: 1, z: coords.z, tx: coords.x, ty: coords.y, size: size, scale: sc,
+          zref: dem ? zref : null, dem: dem, adjust: dem ? PWPFTerrain.config(manifest.terrain) : null });
+        c.getContext('2d').putImageData(new ImageData(rgba, n, n), 0, 0);
+        c.dataset.adjusted = dem ? '1' : '0';
+      }
       function paint(dem) {
-        if (self._params) {
-          var rgba = PWPFCore.renderTile({ params: self._params, merc: manifest.mercator, pal: self._pal, product: self._product,
-            alpha: 1, z: coords.z, tx: coords.x, ty: coords.y, size: size, scale: sc,
-            zref: dem ? zref : null, dem: dem, adjust: dem ? PWPFTerrain.config(manifest.terrain) : null });
-          c.getContext('2d').putImageData(new ImageData(rgba, n, n), 0, 0);
+        try {
+          if (self._params) draw(dem);
+        } catch (e) {
+          console.error('data tile failed' + (dem ? ' (with terrain adjustment); drawing it without' : ''), e);
+          if (dem) { try { draw(null); } catch (e2) { console.error(e2); } }
         }
         finish();
       }
-      if (adjustOn() && self._params === current && coords.z >= manifest.terrain.min_zoom) {
+      if (self._adjust && coords.z >= manifest.terrain.min_zoom && !demDown()) {
         demFor(coords).then(paint, function () { paint(null); });
       } else paint(null);
       return c;
@@ -230,13 +254,27 @@
   var TERRAIN_ATTR = 'Terrain: AWS Terrain Tiles (Mapzen; USGS 3DEP, SRTM, GMTED2010, ETOPO1)';
   function dprScale() { return Math.min(2, Math.max(1, Math.round(window.devicePixelRatio || 1))); }
 
+  /* A change of data or of the terrain adjustment builds a NEW layer under the old one; the old layer is removed only when
+     the new one has painted all its tiles (or after 10 s).  The map never goes blank while elevation tiles load, and a
+     layer that cannot finish can never take the visible one away. */
   function setField(params, prod, pal) {
-    if (!overlay) {
-      overlay = new DataLayer({ bounds: L.latLngBounds(manifest.bounds), scale: dprScale(), opacity: +$('opacity').value,
+    var layer = new DataLayer({ bounds: L.latLngBounds(manifest.bounds), scale: dprScale(), opacity: +$('opacity').value,
                                 minZoom: 0, maxZoom: 18,
-                                attribution: manifest.terrain && manifest.terrain.enabled ? TERRAIN_ATTR : '' }).addTo(map);
+                                attribution: manifest.terrain && manifest.terrain.enabled ? TERRAIN_ATTR : '' });
+    layer.setData(params, prod, pal, adjustOn());
+    if (overlay && overlay !== shown) map.removeLayer(overlay);          // superseded before it ever showed
+    overlay = layer;
+    var swapped = false;
+    function swap() {
+      if (swapped) return;
+      swapped = true;
+      if (overlay !== layer) return;                                     // an even newer layer took over
+      if (shown && shown !== layer) map.removeLayer(shown);
+      shown = layer;
     }
-    overlay.setData(params, prod, pal);
+    layer.once('load', swap);
+    setTimeout(swap, 10000);
+    layer.addTo(map);
   }
 
   function syncShade() {
@@ -323,7 +361,7 @@
     fillThresholds();
     $('thr').onchange = function () { state.thr = +$('thr').value; state._thrSet = true; redraw(); };
     pct.onchange = function () { state.pct = +pct.value; redraw(); };
-    $('opacity').oninput = function () { if (overlay) overlay.setOpacity(+$('opacity').value); };
+    $('opacity').oninput = function () { [overlay, shown].forEach(function (l) { if (l) l.setOpacity(+$('opacity').value); }); };
     var tOn = !!(manifest.terrain && manifest.terrain.enabled);
     $('terrainBox').hidden = !tOn;
     $('shadeRow').hidden = !(tOn && manifest.terrain.hillshade);
