@@ -69,9 +69,28 @@ jobs:
           path: static/prism_ppt_monthly_2p5km.npy
           key: static-prism-v2
 
+      # raw PRISM downloads (and the download ledger) survive between runs, even failed ones, so a retry never
+      # re-requests a file (PRISM refuses a repeat download inside 24 h and the files are ~56 MB each)
+      - name: Restore raw PRISM downloads
+        id: prism_raw
+        if: env.PROFILE != 'synthetic'
+        uses: actions/cache/restore@v4
+        with:
+          path: static/prism_raw
+          key: prism-raw-v1-none
+          restore-keys: prism-raw-v1-
+
       - name: Prepare static inputs
+        id: prepare
         if: env.PROFILE != 'synthetic' && (steps.static_terrain.outputs.cache-hit != 'true' || steps.static_prism.outputs.cache-hit != 'true')
         run: python -m pwpf_blender prepare-static --out static
+
+      - name: Save raw PRISM downloads
+        if: always() && steps.prepare.outcome != 'skipped' && hashFiles('static/prism_raw/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: static/prism_raw
+          key: prism-raw-v1-${{ github.run_id }}
 
       - name: Run pipeline
         run: |
