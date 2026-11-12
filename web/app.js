@@ -41,7 +41,7 @@
     manifest.windows.forEach(function (w) { s[w.length_h] = 1; });
     return Object.keys(s).map(Number).sort(function (a, b) { return a - b; });
   }
-  var MODEL = { gefs: 'GEFS', gefs_mean: 'GEFS mean', ifs_ens: 'ECMWF IFS ENS', ifs_hres: 'ECMWF IFS HRES', gfs: 'GFS',
+  var MODEL = { gefs: 'GEFS', gefs_mean: 'GEFS mean', cmce: 'CMC GEPS', rdps: 'CMC RDPS', gdps: 'CMC GDPS', ifs_ens: 'ECMWF IFS ENS', ifs_hres: 'ECMWF IFS HRES', gfs: 'GFS',
                 hrrr: 'HRRR', rrfs: 'RRFS', rrfs_ens: 'RRFS ensemble', syn_global: 'Synthetic global', syn_cam: 'Synthetic CAM' };
   function modelName(g) { return MODEL[g] || g; }
   function esc(t) { return String(t).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
