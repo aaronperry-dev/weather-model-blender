@@ -12,7 +12,7 @@ import numpy as np
 
 from .constants import SNOW_LEVEL_WARM
 
-from . import binormal, mode as modemod
+from . import accumulation, binormal, mode as modemod
 from .downscale import PrismDownscaler
 from .grid import GridSpec
 from .member import BinContext, bin_products
@@ -255,15 +255,16 @@ class Pipeline:
         snow_bins: list[np.ndarray] = []                    # per 6-h bin: (n, ny, nx) float16 snowfall (in)
         from . import calibration as _cal
         self._pt_idx = _cal.point_indices(self._dst_lat, self._dst_lon, (cfg.get("calibration") or {}).get("points"))
-        self._ptdiag = np.zeros((n, nbins, 5, len(self._pt_idx)), np.float32)     # at the reference points: QPF before PRISM, QPF, potential snow, snow, potential snow with the model's own snow type only (inches)
+        self._ptdiag = np.zeros((n, nbins, 6, len(self._pt_idx)), np.float32)     # at the reference points: QPF before PRISM, QPF, potential snow, snow before / after the marginal-air efficiency, potential snow with the model's own snow type only (inches)
         ice_bins: list[dict] = []                           # per bin: {member index: (ny, nx) float16 ice (in)}
+        accum = accumulation.settings(cfg.get("accumulation")) if (cfg.get("accumulation") or {}).get("enabled", True) else {}
         for k in range(nbins):
             b0 = cycle + timedelta(hours=k * bin_h)
             b1 = b0 + timedelta(hours=bin_h)
             ctx = BinContext(self.terrain, self.downscaler, b0.timetuple().tm_yday,
                              cfg.get("slr", {}), cfg.get("ptype", {}),
                              cfg.get("snow_level", {}).get("wetbulb_c", 0.5),
-                             ice_cfg=dict(cfg.get("ice", {}), enabled=ice_on), bin_hours=bin_h)
+                             ice_cfg=dict(cfg.get("ice", {}), enabled=ice_on), bin_hours=bin_h, accum_cfg=accum)
             sb = np.zeros((n, ny, nx), np.float16)
             ib: dict = {}
             self._run_bin(runs, avail, fails, dead, errors, limit, k, sb, ib, b0, b1, ctx)
@@ -274,6 +275,11 @@ class Pipeline:
         if not avail.any():
             raise RuntimeError("no member delivered any data; first errors: " +
                                "; ".join(f"{runs[i].label}: {e}" for i, e in list(errors.items())[:5]))
+        if accum:                                                       # warm ground melts the first snow of the run (cumulative)
+            d0 = accumulation.ground_melt_in(cycle.timetuple().tm_yday, self._dst_lat, self.terrain, accum)
+            accumulation.apply_ground_melt(snow_bins, d0)
+            log.info("accumulation: marginal-air efficiency + warm-ground melt applied (mean ground loss %.2f in, max %.2f in)",
+                     float(d0.mean()), float(d0.max()))
         weights = np.array([r.weight for r in runs], np.float32)
 
         res = Results(cycle=cycle, grid=self.grid)
@@ -420,7 +426,7 @@ class Pipeline:
                     if aux and "q" in aux and getattr(self, "_pt_idx", None):
                         for pi, (_, _, (pr, pc)) in enumerate(self._pt_idx):
                             self._ptdiag[i, k, :, pi] = (aux["q0"][pr, pc] / 25.4, aux["q"][pr, pc] / 25.4, aux["pot"][pr, pc],
-                                                         float(sn[pr, pc]), aux["pot_nat"][pr, pc])
+                                                         aux["snow_pre"][pr, pc], float(sn[pr, pc]), aux["pot_nat"][pr, pc])
                     snow[i] = sn
                     avail[i, k] = True
                     fails[i] = 0

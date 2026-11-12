@@ -18,6 +18,7 @@ from datetime import datetime
 import numpy as np
 
 from .constants import (MM_PER_INCH, SNOW_LEVEL_COLD, SNOW_LEVEL_WARM, TYPE_FZRA, TYPE_SNOW)
+from . import accumulation
 from .downscale import PrismDownscaler
 from .ice import RADIAL_FACTOR, flat_ice_in
 from .ptype import decision_tree, dominant_type, native_type
@@ -52,6 +53,7 @@ class BinContext:
     min_step_qpf_mm: float = 0.01
     ice_cfg: dict = field(default_factory=dict)   # {"enabled": bool, "report": "flat"|"radial"}
     bin_hours: float = 6.0
+    accum_cfg: dict = field(default_factory=dict)   # warm-ground / marginal-air accumulation (see accumulation.py); {} = off
 
 
 def _aloft_max(levels, psfc):
@@ -141,11 +143,15 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
 
     snow_mask = (ns2 >= 0.5) | (ctx.terrain_m > sl2)
     snow = (q2 / MM_PER_INCH * slr2 * snow_mask).astype(np.float32)
+    snow_pre = snow
+    if accumulation.active(ctx.accum_cfg):
+        snow = (snow * accumulation.temp_efficiency(sl2, ctx.terrain_m, ctx.accum_cfg, ctx.snow_level_wb_c)).astype(np.float32)
     if aux is not None:
         aux["pot"] = (q2 / MM_PER_INCH * slr2).astype(np.float32)
         aux["sl"] = np.clip(sl2, SNOW_LEVEL_COLD, SNOW_LEVEL_WARM).astype(np.float32)
         aux["q"] = q2.astype(np.float32)
         aux["q0"] = q_raw.astype(np.float32)
+        aux["snow_pre"] = snow_pre.astype(np.float32)
         aux["pot_nat"] = (q2 / MM_PER_INCH * slr2 * (ns2 >= 0.5)).astype(np.float32)      # snow if only the model's own snow type counted
     if ice2 is not None:
         if ctx.ice_cfg.get("report", "flat") == "radial":

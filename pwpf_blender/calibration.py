@@ -109,7 +109,7 @@ def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None =
                 out.append(f"      {name:<16}{ref:>5.2f}{float(fit['mode'][pr, pc]):>7.2f}{float(p50[pr, pc]):>7.2f}"
                            f"{float(pt[:, q].mean()):>9.2f}  {gv}")
             if ptdiag is not None:
-                out.extend(_decomposition(ptdiag, runs, members, groups, idx_pts, k0, k1))
+                out.extend(_decomposition(ptdiag, pt, runs, members, groups, idx_pts, k0, k1))
             ratios = [float(fit["mode"][pr, pc]) / ref for _, ref, (pr, pc) in idx_pts if ref >= 0.5]
             if ratios:
                 out.append(f"   mode / NWS at the {len(ratios)} points with >= 0.5 in:  median {np.median(ratios):.1f}x  "
@@ -117,26 +117,32 @@ def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None =
     return "\n".join(out)
 
 
-def _decomposition(ptdiag, runs, members, groups, idx_pts, k0, k1):
-    """snow = QPF x snow share x SLR per model group, averaged over the reference points where NWS shows >= 0.5 in.
-    ptdiag[i, k] = (QPF before PRISM, QPF, potential snow, snow, potential snow with the model's own snow type only)."""
+def _decomposition(ptdiag, pt, runs, members, groups, idx_pts, k0, k1):
+    """snow = QPF x snow share x SLR x efficiencies, per model group, averaged over the reference points where NWS shows
+    >= 0.5 in.  ptdiag[i, k] = (QPF before PRISM, QPF, potential snow, snow before and after the marginal-air efficiency,
+    potential snow with the model's own snow type only); pt[j] = final snow (after the warm-ground melt) per point."""
     sel = [q for q, (_, ref, _) in enumerate(idx_pts) if ref >= 0.5]
     if not sel:
         return []
-    out = ["   what makes the snow, per group, mean over the points with NWS >= 0.5 in:  snow = QPF x snow share x SLR",
+    out = ["   what makes the snow, per group, mean over the points with NWS >= 0.5 in:",
+           "      snow = QPF x snow share x SLR x air efficiency x ground efficiency",
            "      (QPF raw = model liquid before PRISM; PRISM x = downscaling factor; own share = liquid that the model's own",
-           "       precipitation type calls snow; share = after also counting terrain above the 0.5 C wet-bulb level as snow)",
-           f"      {'group':<14}{'QPF raw':>8}{'PRISM x':>8}{'QPF in':>8}{'own share':>10}{'share':>7}{'SLR':>6}{'snow in':>9}{'NWS in':>8}"]
+           "       precipitation type calls snow; share = also counting terrain above the 0.5 C wet-bulb level as snow;",
+           "       air eff = marginal-air accumulation; ground eff = warm-ground melt; both 1.00 when accumulation is off)",
+           f"      {'group':<14}{'QPF raw':>8}{'PRISM x':>8}{'QPF in':>8}{'own share':>10}{'share':>7}{'SLR':>6}{'air eff':>8}"
+           f"{'gnd eff':>8}{'snow in':>9}{'NWS in':>8}"]
     nws = float(np.mean([idx_pts[q][1] for q in sel]))
     allj = list(range(len(members)))
     for g, js in [("ALL MEMBERS", allj)] + sorted(groups.items()):
         ii = [members[j] for j in js]
-        d = ptdiag[ii][:, k0:k1].sum(axis=1)[:, :, sel]             # (members, 5, points): window sums
-        q0, q, pot, snow, nat = (float(d[:, c].mean()) for c in range(5))
+        d = ptdiag[ii][:, k0:k1].sum(axis=1)[:, :, sel]             # (members, 6, points): window sums
+        q0, q, pot, snow_pre, snow_air, nat = (float(d[:, c].mean()) for c in range(6))
+        final = float(pt[js][:, sel].mean())
         if q <= 0:
             continue
         out.append(f"      {g[:13]:<14}{q0:>8.2f}{(q / q0 if q0 > 0 else 0):>8.2f}{q:>8.2f}{(nat / pot if pot > 0 else 0):>10.2f}"
-                   f"{(snow / pot if pot > 0 else 0):>7.2f}{(pot / q):>6.1f}{snow:>9.2f}{nws:>8.2f}")
+                   f"{(snow_pre / pot if pot > 0 else 0):>7.2f}{(pot / q):>6.1f}{(snow_air / snow_pre if snow_pre > 0 else 1):>8.2f}"
+                   f"{(final / snow_air if snow_air > 0 else 1):>8.2f}{final:>9.2f}{nws:>8.2f}")
     return out
 
 
