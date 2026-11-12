@@ -101,15 +101,18 @@ def write_site(results, cfg: dict, outdir: str | Path) -> Path:
     for wid, w in results.windows.items():
         _write_layer(mg, w, out / f"{wid}.png", ENC_A, ENC_XMAX)
         entry = {"id": wid, "label": w["label"], "length_h": w["length_h"], "end_h": w["end_h"],
-                 "file": f"{wid}.png", "start": _iso(w["start"]), "end": _iso(w["end"]), "ice_file": None}
+                 "file": f"{wid}.png", "start": _iso(w["start"]), "end": _iso(w["end"]), "ice_file": None,
+                 "n_members": int(w.get("n_members", results.meta.get("n_members") or 0)),
+                 "reduced": bool(w.get("reduced", False))}
         if wid in results.ice:
             _write_layer(mg, results.ice[wid], out / f"{wid}_ice.png", ICE_ENC_A, ICE_ENC_XMAX)
             entry["ice_file"] = f"{wid}_ice.png"
         wins.append(entry)
     groups: dict = {}
     for m in results.members:
-        g = groups.setdefault(m["group"], {"group": m["group"], "members": 0, "inits": set()})
+        g = groups.setdefault(m["group"], {"group": m["group"], "members": 0, "requested": 0, "inits": set()})
         g["members"] += int(m["ok"])
+        g["requested"] += 1
         g["inits"].add(m["init"])
     manifest = {
         "version": __version__,
@@ -132,8 +135,11 @@ def write_site(results, cfg: dict, outdir: str | Path) -> Path:
         "thresholds_in": cfg.get("thresholds_in", [1, 2, 4, 6, 8, 12, 18, 24]),
         "percentiles": cfg.get("percentiles", [5, 10, 25, 50, 75, 90, 95]),
         "members_total": results.meta.get("n_members"),
-        "groups": [{"group": g["group"], "members": g["members"], "inits": sorted(g["inits"])}
-                   for g in groups.values()],
+        "members_requested": results.meta.get("n_requested", results.meta.get("n_members")),
+        "groups": [{"group": g["group"], "members": g["members"], "requested": g["requested"],
+                    "inits": sorted(g["inits"])} for g in groups.values()],
+        "members": results.members,
+        "windows_skipped": results.skipped,
         "mode_method": cfg.get("mode", {}).get("method", "pmm"),
         "slr": cfg.get("slr", {}),
         "grid_stride": results.grid.stride,
