@@ -62,7 +62,8 @@
       for (var i = 0; i < x.bins.length; i++) cov += '<i class="' + (x.bins[i] === '1' ? 'y' : '') + '" title="+' + i * 6 + '–' + (i + 1) * 6 + ' h"></i>';
       var cls = x.ok ? 'ok' : (x.bins_ok > 0 ? 'part' : 'bad');
       var txt = x.ok ? 'Used' : (x.bins_ok > 0 ? 'Partial (' + x.bins_ok + '/' + x.bins_total + ')' : 'Missing');
-      var note = x.error ? esc(x.error) : (x.fallback ? 'Uses ' + esc(modelName(x.fallback)) + ' beyond +' + x.max_fxx_h + ' h from run start' : '');
+      var note = [x.note ? esc(x.note) : '', x.error ? esc(x.error) : '',
+                  (!x.note && !x.error && x.fallback) ? 'Uses ' + esc(modelName(x.fallback)) + ' beyond +' + x.max_fxx_h + ' h from run start' : ''].filter(Boolean).join(' · ');
       html += '<tr><td>' + esc(modelName(x.group)) + '</td><td>' + esc(x.member || 'det.') + '</td><td>' + fmtShort(x.init) +
         '</td><td><span class="cov">' + cov + '</span></td><td class="st ' + cls + '">' + txt + '</td><td class="note">' + note + '</td></tr>';
     });
@@ -262,6 +263,39 @@
     { name: 'USGS Topo', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
       attr: 'Basemap courtesy of the U.S. Geological Survey', native: 16 }
   ];
+  /* Administrative boundaries drawn above the data (pane z 440, below the basemap's place labels at 450):
+     international borders, state lines, and county lines (only from zoom 6).  Data: web/borders/*.json. */
+  function setupBorders(ctl) {
+    map.createPane('borders'); map.getPane('borders').style.zIndex = 440; map.getPane('borders').style.pointerEvents = 'none';
+    var rend = L.canvas({ pane: 'borders' }), internal = false;
+    var defs = [
+      { key: 'countries', label: 'Country borders', style: { color: '#161616', weight: 1.9, opacity: 0.9 } },
+      { key: 'states', label: 'State lines', style: { color: '#2b2b2b', weight: 1.1, opacity: 0.8 } },
+      { key: 'counties', label: 'County lines (zoom 6+)', style: { color: '#4a4a4a', weight: 0.6, opacity: 0.55 }, minZoom: 6 }
+    ];
+    defs.forEach(function (d) {
+      d.layer = L.geoJSON(null, { pane: 'borders', renderer: rend, style: d.style, interactive: false });
+      d.on = true;
+      ctl.addOverlay(d.layer, d.label);
+      fetch('borders/' + d.key + '.json').then(function (r) { return r.json(); })
+        .then(function (g) { d.layer.addData({ type: 'Feature', properties: {}, geometry: g }); })
+        .catch(function () { /* borders are cosmetic; ignore a missing file */ });
+    });
+    function of(layer) { return defs.filter(function (d) { return d.layer === layer; })[0]; }
+    function sync() {
+      internal = true;
+      defs.forEach(function (d) {
+        var show = d.on && (!d.minZoom || map.getZoom() >= d.minZoom), has = map.hasLayer(d.layer);
+        if (show && !has) map.addLayer(d.layer); else if (!show && has) map.removeLayer(d.layer);
+      });
+      internal = false;
+    }
+    map.on('overlayadd', function (e) { var d = of(e.layer); if (d && !internal) { d.on = true; sync(); } });
+    map.on('overlayremove', function (e) { var d = of(e.layer); if (d && !internal) d.on = false; });
+    map.on('zoomend', sync);
+    sync();
+  }
+
   function setupBasemap() {
     map.createPane('labels'); map.getPane('labels').style.zIndex = 450; map.getPane('labels').style.pointerEvents = 'none';
     var layers = {}, active = 0, refLayers = [], notice = null;
@@ -297,6 +331,7 @@
     }
     show(0);
     var ctl = L.control.layers(layers, null, { position: 'topright', collapsed: true }).addTo(map);
+    setupBorders(ctl);
     map.on('baselayerchange', function (e) {
       BASES.forEach(function (b, j) { if (layers[b.name] === e.layer) { active = j; } });
       BASES.forEach(function (b, j) { if (refLayers[j]) { if (j === active) refLayers[j].addTo(map); else map.removeLayer(refLayers[j]); } });

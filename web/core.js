@@ -5,9 +5,11 @@
 })(typeof self !== 'undefined' ? self : this, function (Binormal) {
   'use strict';
 
-  /* Probabilities: ColorBrewer sequential YlGnBu (9 classes), one class per 10 % step from 10 %. */
+  /* Probabilities: ColorBrewer sequential BuPu (blue -> purple), one class per 10 % step from 10 %.  The two
+     near-white BuPu classes are merged into #cfe0ee so that 10-20 % stays visible on a light basemap, and one step
+     (#670763) is interpolated between the two darkest classes to get nine. */
   var PROB_STOPS = [10, 20, 30, 40, 50, 60, 70, 80, 90];
-  var PROB_COLORS = ['#ffffd9', '#edf8b1', '#c7e9b4', '#7fcdbb', '#41b6c4', '#1d91c0', '#225ea8', '#253494', '#081d58'];
+  var PROB_COLORS = ['#cfe0ee', '#bfd3e6', '#9ebcda', '#8c96c6', '#8c6bb1', '#88419d', '#810f7c', '#670763', '#4d004b'];
   /* Snowfall amounts: the NWS "Expected Snowfall" ramp (colours sampled from the official legend); each colour
      starts at its stop, e.g. 6-8 in = pale yellow, 72+ in = purple. */
   var SNOW_STOPS = [0.1, 1, 2, 3, 4, 6, 8, 12, 18, 24, 30, 36, 48, 60, 72];
