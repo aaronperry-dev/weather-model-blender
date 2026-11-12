@@ -34,6 +34,14 @@ percentiles: [5, 10, 25, 50, 75, 90, 95]
 snow_level:
   wetbulb_c: 0.5             # PWPF: 0.5 degC wet-bulb surface
 
+accumulation:                # NOT in WPC's published recipe: how much of the falling snow accumulates (see README "Accumulation")
+  enabled: true
+  wb_full_c: -1.0            # ground wet-bulb at or below this: all snow accumulates
+  wb_zero_c: 1.5             # ... at or above this: only min_eff of it does (linear in between)
+  min_eff: 0.25
+  wb_lapse_c_per_km: 6.0     # wet-bulb rise below the 0.5 C level
+  ground_melt_in_per_c: 0.15 # warm ground melts the first (0.15 in x soil temperature in C) of snow of the run
+
 ice:                         # freezing rain: simplified FRAM (Sanders & Barjenbruch 2016), precip-rate term only
   enabled: true
   report: flat               # flat (elevated horizontal ice) | radial (= 0.394 x flat)
