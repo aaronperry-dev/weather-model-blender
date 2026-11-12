@@ -103,7 +103,7 @@ All HTTP goes through one polite client (`noaa_http._request`), so no server's r
 | Server | Published limit | What this client does |
 |---|---|---|
 | NOMADS / NCEP ftp (`nomads.ncep.noaa.gov`, `ftp(prd).ncep.noaa.gov`) | 120 hits/min per IP, summed over those hosts, HEAD counts like GET ([SCN 21-32](https://www.weather.gov/media/notification/pdf2/scn21-32nomad_changes.pdf)) | ≤ 60 requests/min in total, 2 connections; only used if AWS fails |
-| AWS open-data buckets (NOAA, ECMWF mirror) | none published; S3 answers `503 SlowDown` when a prefix is hammered | ≤ 20 requests/s and 6 connections per NOAA bucket (10 and 4 elsewhere, 3/s and 2 for the ECMWF mirror); back-off on 503 |
+| AWS open-data buckets (NOAA, ECMWF mirror) | none published; S3 answers `503 SlowDown` when a prefix is hammered | ≤ 20 requests/s and 6 connections per NOAA bucket (10 and 4 elsewhere, 4/s and 2 for the ECMWF mirror, where every ranged GET the ecmwf-opendata client makes is paced and counted); back-off on 503, shared by all threads; if a mirror keeps failing the IFS download moves on to google, azure, then data.ecmwf.int |
 | ECMWF open data | 500 simultaneous connections | ≤ 2 requests/s; `ecmwf-opendata` retries capped at 3 (library default is 500 × 120 s) |
 | PRISM | refuses a file downloaded twice within 24 h | one request every 2 s, one connection, files streamed to disk once, a ledger refuses to re-request a file inside 24 h, raw files cached between workflow runs |
 
