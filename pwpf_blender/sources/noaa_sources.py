@@ -373,22 +373,19 @@ class IfsSource(Source):
             with IfsSource._health_lock:
                 if IfsSource._t_first is None:
                     IfsSource._t_first = time.monotonic()
-                spent = time.monotonic() - IfsSource._t_first
                 order = [self.source] + [m for m in self.MIRRORS if m != self.source]
                 chain = sorted(order, key=lambda m: (IfsSource._fails.get(m, 0), order.index(m)))
-            if spent > self.BUDGET_S:
-                raise nh.FetchError(f"ECMWF open data: time budget of {self.BUDGET_S / 60:.0f} min for IFS downloads is used "
-                                    f"up ({spent / 60:.0f} min); skipping the rest (PWPF_IFS_BUDGET_MIN changes it)")
-            errors = []
+            self._check_budget()
+            errors, got = [], {}                  # `got`: bytes already downloaded, kept across mirrors (resume)
             for mirror in chain:
                 try:
-                    # The client's downloader makes one ranged GET per GRIB message (S3 cannot serve several ranges at
-                    # once), i.e. far more requests than files; mount_polite paces and counts every one of them.
-                    # Library default is 500 retries x 120 s: keep it short and move on to the next mirror instead.
-                    with nh.polite(hosts.get(mirror, hosts["ecmwf"]), cost=0):
-                        client = Client(source=mirror, maximum_retries=3, retry_after=[5, 20, 2])
-                        nh.mount_polite(client.session)
-                        client.retrieve(**req)
+                    client = Client(source=mirror, maximum_retries=3, retry_after=[5, 20, 2])
+                    nh.mount_polite(client.session)                    # the index requests go through the rate limit too
+                    if hasattr(client, "_get_urls"):
+                        self._download_ranges(client, req, target, got)
+                    else:                                              # pragma: no cover - other client versions
+                        with nh.polite(hosts.get(mirror, hosts["ecmwf"]), cost=0):
+                            client.retrieve(**req)
                     with IfsSource._health_lock:
                         IfsSource._fails[mirror] = 0
                     if errors:
@@ -399,12 +396,68 @@ class IfsSource(Source):
                     for junk in (target, Path(str(target) + ".part")):
                         if junk.exists():
                             junk.unlink()                                  # never keep a truncated download
-                    if "404" in str(e):                                    # not published yet: other mirrors won't have it
+                    if self._not_published(e) or "time budget" in str(e):  # not published / out of time: stop here
                         break
                     with IfsSource._health_lock:
                         IfsSource._fails[mirror] = IfsSource._fails.get(mirror, 0) + 1
             raise nh.FetchError(f"ECMWF open data request failed on every mirror ({' | '.join(errors)}); "
                                 f"request={ {k: v for k, v in req.items() if k != 'target'} }")
+
+    @staticmethod
+    def _not_published(e: Exception) -> bool:
+        m = str(e)
+        return getattr(e, "status", None) == 404 or "404 Client Error" in m or "404 Not Found" in m
+
+    def _check_budget(self) -> None:
+        spent = time.monotonic() - (IfsSource._t_first or time.monotonic())
+        if spent > self.BUDGET_S:
+            raise nh.FetchError(f"ECMWF open data: time budget of {self.BUDGET_S / 60:.0f} min for IFS downloads is used "
+                                f"up ({spent / 60:.0f} min); skipping the rest (PWPF_IFS_BUDGET_MIN changes it)")
+
+    def _download_ranges(self, client, req: dict, target: Path, got: dict) -> None:
+        """Resolve the request to (file, byte ranges) with the client's index lookup, then fetch the ranges ourselves.
+
+        The client's own downloader restarts the whole file whenever one ranged GET keeps failing, and S3 answers
+        `503 SlowDown` now and then.  Here every range is fetched through `noaa_http._request` (rate limit, shared
+        back-off, request accounting), finished ranges are kept in `got` (so they are not fetched again, not even
+        from another mirror), and the pieces are written in file order at the end."""
+        kw = {k: v for k, v in req.items() if k != "target"}
+        res = client._get_urls(None, use_index=True, target=str(target), **kw)
+        root = str(client.source.url).rstrip("/")
+        todo = []
+        for url, parts in res.urls:
+            rel = url[len(root):] if url.startswith(root) else url
+            todo.append((url, rel, sorted((int(o), int(n)) for o, n in parts)))
+        for url, rel, parts in todo:
+            missing = [(o, n) for o, n in parts if (rel, o, n) not in got]
+            i = 0
+            while i < len(missing):                                       # group ranges closer than MERGE_GAP
+                j = i
+                while j + 1 < len(missing) and missing[j + 1][0] - (missing[j][0] + missing[j][1]) <= nh.MERGE_GAP:
+                    j += 1
+                a, b = missing[i][0], missing[j][0] + missing[j][1] - 1
+                self._check_budget()
+                blob = self._get_range(url, a, b)
+                for o, n in missing[i:j + 1]:
+                    got[(rel, o, n)] = blob[o - a:o - a + n]
+                i = j + 1
+        tmp = Path(str(target) + ".part")
+        with open(tmp, "wb") as f:
+            for url, rel, parts in todo:
+                for o, n in parts:
+                    f.write(got[(rel, o, n)])
+        os.replace(tmp, target)
+
+    @staticmethod
+    def _get_range(url: str, a: int, b: int) -> bytes:
+        r = nh._request(url, headers={"Range": f"bytes={a}-{b}"})
+        try:
+            if r.status_code != 206 or len(r.content) != b - a + 1:
+                raise nh.HttpStatusError(f"{url}: asked for bytes {a}-{b}, got HTTP {r.status_code} with "
+                                         f"{len(r.content)} bytes", r.status_code)
+            return r.content
+        finally:
+            r.close()
 
     def _decode(self, path: Path, steps=None) -> dict:
         """{(shortName, typeOfLevel, level, step_h): cropped float32 array}"""
