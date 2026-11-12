@@ -83,6 +83,26 @@ text, so there is no cfgrib/eccodes short-name guessing. AWS Open Data is tried 
 
 RRFS `prslev` files are ~550 MB each, which is why byte-range subsetting matters: a step downloads a few tens of MB.
 
+### Respecting server limits
+
+All HTTP goes through one polite client (`noaa_http._request`), so no server's rate or download limit is approached:
+
+| Server | Published limit | What this client does |
+|---|---|---|
+| NOMADS / NCEP ftp (`nomads.ncep.noaa.gov`, `ftp(prd).ncep.noaa.gov`) | 120 hits/min per IP, summed over those hosts, HEAD counts like GET ([SCN 21-32](https://www.weather.gov/media/notification/pdf2/scn21-32nomad_changes.pdf)) | ≤ 60 requests/min in total, 2 connections; only used if AWS fails |
+| AWS open-data buckets (NOAA, ECMWF mirror) | none published; S3 answers `503 SlowDown` when a prefix is hammered | ≤ 10 requests/s and 4 connections per bucket; back-off on 503 |
+| ECMWF open data | 500 simultaneous connections | ≤ 2 requests/s; `ecmwf-opendata` retries capped at 3 (library default is 500 × 120 s) |
+| PRISM | refuses a file downloaded twice within 24 h | one request every 2 s, one connection, files streamed to disk once, a ledger refuses to re-request a file inside 24 h, raw files cached between workflow runs |
+
+On `429`/`503` (and `403` from NCEP, whose firewall blocks over-limit IPs) it honours `Retry-After` or backs off
+exponentially with jitter; four consecutive throttles put a host on a 5-minute cool-down during which requests fail fast
+(callers fall back to another mirror or drop the member). A missing file (`404`) is never retried, matching the NWS
+guidance not to re-request a file that isn't published yet. Each file's `.idx` is fetched once per run, and the previous
+step's accumulation is kept so the next bin doesn't download the same records again. The run log ends with the
+**request budget** (requests, MB, throttles and seconds spent waiting, per server); `PWPF_HTTP_RATE_SCALE` exists only
+for the unit tests and must stay at 1 in CI. Schedules fire twice a day, after the data are published, and runs never
+overlap (`concurrency` group).
+
 ### Diagnosing a feed
 
 ```bash
@@ -108,9 +128,11 @@ the run aborts below `min_members`.
 
 PRISM retired its BIL files and old web service on 2025-10-01 (everything is now Cloud Optimized GeoTIFF), and its new
 web service does **not** serve the 30-year normals - those come from PRISM's FTP tree, browsable over HTTPS. `prepare-static`
-therefore reads the directory listing at `https://data.prism.oregonstate.edu/normals/us/4km/ppt/`, picks the twelve
-monthly grids by file name (GeoTIFF preferred, zipped BIL also understood) and checks that each download really is a
-zip/TIFF. If the names don't look like twelve months it prints the listing it saw.
+therefore reads the directory listing at `https://data.prism.oregonstate.edu/normals/us/800m/ppt/monthly/`
+(files `prism_ppt_us_30s_2020MM_avg_30y.zip`, ~56 MB each, ~0.7 GB once; the 12 months are then area-averaged onto the
+2.5 km grid and cached). Pass `--prism-url https://data.prism.oregonstate.edu/normals/us/4km/ppt/monthly/` for the
+lighter 4 km set. Files are picked by name (GeoTIFF or zipped BIL), each download is checked to really be a zip/TIFF,
+and if the names don't look like twelve months the listing it saw is printed.
 
 PRISM is **not fatal**: if it can't be fetched the build continues without QPF downscaling, a GitHub Actions warning is
 raised, and the site's notice says "PRISM QPF downscaling was not applied". The workflow caches terrain and PRISM

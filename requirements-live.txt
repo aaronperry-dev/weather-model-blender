@@ -1,6 +1,8 @@
 # live data access (not needed for --synthetic runs or the unit tests)
 # NOAA feeds are read with plain HTTPS + .idx byte ranges and decoded with eccodes (no Herbie).
 eccodes
+tifffile
+imagecodecs         # TIFF fallback reader for PRISM COGs with compressions Pillow lacks
 requests
 ecmwf-opendata
 # only for `validate` / external WPC grids (reads user-supplied GRIB2 with cfgrib)

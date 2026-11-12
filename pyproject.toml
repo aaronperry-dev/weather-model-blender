@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.26", "scipy>=1.11", "pillow>=10", "pyyaml>=6"]
 
 [project.optional-dependencies]
-live = ["eccodes", "requests", "ecmwf-opendata", "xarray", "cfgrib"]
+live = ["eccodes", "tifffile", "imagecodecs", "requests", "ecmwf-opendata", "xarray", "cfgrib"]
 dev = ["pytest"]
 
 [tool.setuptools]
