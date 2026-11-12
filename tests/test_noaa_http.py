@@ -356,3 +356,38 @@ def test_lambert_grid_decodes_to_2d_latlon_south_first():
     assert g.grid_type == "lambert" and g.lat.shape == (6, 8) and v.shape == (6, 8)
     assert g.lat[0, 0] == pytest.approx(20.19, abs=1e-3) and g.lat[-1, 0] > g.lat[0, 0]
     assert v[0, 1] == 1 and v[1, 0] == 8                           # row-major, row 0 = first scanned row
+
+
+from datetime import timedelta  # noqa: E402
+
+
+def test_ifs_span_fetches_once_and_decodes_only_wanted_steps(tmp_path, monkeypatch):
+    """With set_span, every 6-h bin asks for the same whole-run file, and only that bin's steps are decoded."""
+    shape = (4, 6)
+    c = lambda v: np.full(shape, v, np.float32)                       # noqa: E731
+    sfc, pl = b"", b""
+    for step in (0, 6, 12, 18, 24):
+        sfc += _ifs_msg("2t", "heightAboveGround", 2, step, c(270.0))
+        sfc += _ifs_msg("sp", "surface", 0, step, c(95000.0))
+        if step:
+            sfc += _ifs_msg("tp", "surface", 0, step, c(0.001 * step))
+        for p in ns.LEVELS:
+            pl += _ifs_msg("t", "isobaricInhPa", p, step, c(268.0))
+            pl += _ifs_msg("r", "isobaricInhPa", p, step, c(75.0))
+            pl += _ifs_msg("gh", "isobaricInhPa", p, step, c(1000.0 + p))
+    (tmp_path / "sfc.grib2").write_bytes(sfc)
+    (tmp_path / "pl.grib2").write_bytes(pl)
+    src = ns.IfsSource("ifs_ens", ensemble=True, save_dir=tmp_path)
+    calls = []
+
+    def fake(init, steps, member, levtype):
+        calls.append((levtype, tuple(steps)))
+        return tmp_path / ("sfc.grib2" if levtype == "sfc" else "pl.grib2")
+    monkeypatch.setattr(src, "_retrieve", fake)
+    src.set_span(INIT, INIT + timedelta(hours=24))
+    a = src.load_steps(INIT, INIT, INIT + timedelta(hours=12), 1)
+    b = src.load_steps(INIT, INIT + timedelta(hours=12), INIT + timedelta(hours=24), 1)
+    assert {s for _, s in calls} == {(0, 6, 12, 18, 24)}
+    assert [o.valid for o in a] == [INIT + timedelta(hours=6), INIT + timedelta(hours=12)]
+    assert [o.valid for o in b] == [INIT + timedelta(hours=18), INIT + timedelta(hours=24)]
+    assert float(b[0].qpf_mm[0, 0]) == pytest.approx(6.0, abs=1e-3)     # tp(18)-tp(12)
