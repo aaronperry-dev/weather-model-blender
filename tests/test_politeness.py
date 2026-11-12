@@ -358,6 +358,8 @@ def _fresh_ifs_state(monkeypatch):
     from pwpf_blender.sources.noaa_sources import IfsSource
     monkeypatch.setattr(IfsSource, "_fails", {})
     monkeypatch.setattr(IfsSource, "_t_first", None)
+    monkeypatch.setattr(IfsSource, "_index_cache", {})
+    monkeypatch.setattr(IfsSource, "_index_locks", {})
 
 
 def _ifs(monkeypatch, tmp_path, plan, http=None):
@@ -479,3 +481,56 @@ def test_ifs_time_budget_stops_further_downloads(tmp_path, monkeypatch):
     time.sleep(0.01)
     with pytest.raises(nh.FetchError, match="time budget"):
         src._retrieve(datetime(2026, 1, 15, 0), [6], 4, "sfc")
+
+
+def test_limiter_halves_on_throttle_and_recovers():
+    lim = nh.Limiter(rate=4.0, burst=8)
+    lim.throttled(); lim.throttled()
+    assert lim.rate == pytest.approx(1.0)
+    for _ in range(10):
+        lim.throttled()
+    assert lim.rate == pytest.approx(0.5)                 # floor: 1/8 of the base rate
+    for _ in range(100):
+        lim.succeeded()
+    assert lim.rate == pytest.approx(4.0)                 # creeps back to the base rate, never above
+
+
+def test_request_throttle_slows_the_whole_host(server, monkeypatch):
+    sc, base = server
+    sc.plan = [(503, {}, b""), (200, {}, b"ok")]
+    ft = FakeTime()
+    pol = nh.policy_for(base + "/x")
+    pol.limiter = nh.Limiter(rate=4.0, burst=8, clock=ft.clock, sleep=ft.sleep)
+    monkeypatch.setattr(nh.time, "sleep", ft.sleep)
+    assert nh._request(base + "/a").status_code == 200
+    assert pol.limiter.rate < 4.0 and pol.limiter.rate >= 2.0     # halved by the 503, then started to recover
+    assert ft.t - 100.0 >= 1.5                                    # the retry waited out the back-off
+
+
+def test_index_files_are_fetched_once_for_all_members(tmp_path):
+    import requests
+    from pwpf_blender.sources.noaa_sources import IfsSource
+    calls = []
+
+    class Sess:
+        def get(self, url, **kw):
+            calls.append(url)
+            r = requests.Response()
+            r.status_code, r._content = (200, b'{"a": 1}\n') if "ok" in url else (503, b"")
+            return r
+
+    class C:
+        session = Sess()
+
+    c1, c2 = C(), C()
+    c1.session, c2.session = Sess(), Sess()
+    IfsSource._cache_indexes(c1)
+    IfsSource._cache_indexes(c2)
+    a = c1.session.get("https://h/ok-1.index")
+    b = c2.session.get("https://h/ok-1.index")
+    assert len(calls) == 1 and a.content == b.content and list(b.iter_lines()) == [b'{"a": 1}']
+    assert c1.session.get("https://h/bad.index").status_code == 503
+    assert c1.session.get("https://h/bad.index").status_code == 503      # errors are not cached
+    assert len(calls) == 3
+    c1.session.get("https://h/data.grib2")                                # other URLs pass straight through
+    assert len(calls) == 4

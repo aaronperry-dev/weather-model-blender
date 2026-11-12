@@ -126,7 +126,9 @@ def test_default_member_list_matches_pwpf_documentation_counts():
     assert by["gefs"] == 10 and by["ifs_ens"] == 25 and by["hrrr"] == 2 and by["rrfs"] == 2
     assert by["rrfs_ens"] == 10 and by["gefs_mean"] == 1 and by["gfs"] == 1 and by["ifs_hres"] == 1
     gefs_inits = {r.init for r in runs if r.group == "gefs"}
-    assert gefs_inits == {datetime(2026, 1, 15, 6)}
+    assert gefs_inits == {datetime(2026, 1, 15, 12)}                         # newest run that has started by the cycle (age_h 0)
+    assert {r.init for r in runs if r.group == "ifs_ens"} == {datetime(2026, 1, 15, 12)}
+    assert {r.init for r in runs if r.group == "rdps"} == {datetime(2026, 1, 15, 12), datetime(2026, 1, 15, 6)}
     assert {r.init for r in runs if r.group == "hrrr"} == {datetime(2026, 1, 15, 12), datetime(2026, 1, 15, 6)}
     assert all(r.fallback is not None for r in runs if r.group == "hrrr")
 

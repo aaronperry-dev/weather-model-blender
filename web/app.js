@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var DATA = 'data/';
-  var state = { win: null, prod: 'snow', kind: 'prob', thr: null, pct: 50, pt: null, adj: true, shade: false };
+  var state = { win: null, prod: 'snow', kind: 'mode', thr: null, pct: 50, pt: null, adj: true, shade: true };
   var manifest, map, overlay, shadeLayer, cache = {}, cacheOrder = [], current = null, mercator, zref = null, zrefP = null;
 
   function $(id) { return document.getElementById(id); }
@@ -27,7 +27,7 @@
       if (p[0] === 't') state.thr = +p[1];
       if (p[0] === 'q') state.pct = +p[1];
       if (p[0] === 'ta') state.adj = p[1] !== '0';
-      if (p[0] === 'sh') state.shade = p[1] === '1';
+      if (p[0] === 'sh') state.shade = p[1] !== '0';
       if (p[0] === 'p') { var ll = p[1].split(','); if (ll.length === 2) state.pt = { lat: +ll[0], lng: +ll[1] }; }
     });
   }
@@ -144,14 +144,17 @@
     var tz = Math.min(c.z, manifest.terrain.dem_max_zoom), f = Math.pow(2, c.z - tz), tx = Math.floor(c.x / f), ty = Math.floor(c.y / f);
     return demTile(tz, tx, ty).then(function (data) { return { data: data, tz: tz, tx: tx, ty: ty, size: 256 }; });
   }
-  function elevationAt(latlng) {                         // metres, from a z <= 10 tile
-    var z = Math.min(10, manifest.terrain.dem_max_zoom), n = Math.pow(2, z);
+  function elevZoom() { return Math.min(Math.max(Math.round(map.getZoom()), manifest.terrain.min_zoom), manifest.terrain.dem_max_zoom); }
+  function elevationAt(latlng) {                         // metres, from the tile the map shows at this zoom (usually already cached)
+    var z = elevZoom(), n = Math.pow(2, z);
     var xw = (latlng.lng + 180) / 360 * n, lat = latlng.lat * Math.PI / 180;
     var yw = (1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2 * n;
     var tx = Math.floor(xw), ty = Math.floor(yw);
     return demTile(z, tx, ty).then(function (d) { return PWPFTerrain.sample(d, 256, (xw - tx) * 256 - 0.5, (yw - ty) * 256 - 0.5); });
   }
   function adjustOn() { return !!(state.adj && manifest.terrain && manifest.terrain.enabled && zref && current && current.pot && !demDown()); }
+  function adjustHere() { return adjustOn() && Math.round(map.getZoom()) >= manifest.terrain.min_zoom; }     // the layer only adjusts from min_zoom
+  function elevationOn() { return !!(manifest.terrain && manifest.terrain.enabled && !demDown() && Math.round(map.getZoom()) >= manifest.terrain.min_zoom); }
 
   function product() {
     if (state.kind === 'prob') return { kind: 'prob', t: state.thr, pal: state.prod };
@@ -182,6 +185,7 @@
       var self = this, size = this.getTileSize().x, sc = this.options.scale, n = size * sc;
       var c = L.DomUtil.create('canvas', 'leaflet-tile');
       c.width = c.height = n;
+      function finish() { setTimeout(function () { done(null, c); }, 0); }   // Leaflet ignores a done() called before createTile returns: the tile would stay hidden
       function paint(dem) {
         if (self._params) {
           var rgba = PWPFCore.renderTile({ params: self._params, merc: manifest.mercator, pal: self._pal, product: self._product,
@@ -189,7 +193,7 @@
             zref: dem ? zref : null, dem: dem, adjust: dem ? PWPFTerrain.config(manifest.terrain) : null });
           c.getContext('2d').putImageData(new ImageData(rgba, n, n), 0, 0);
         }
-        done(null, c);
+        finish();
       }
       if (adjustOn() && self._params === current && coords.z >= manifest.terrain.min_zoom) {
         demFor(coords).then(paint, function () { paint(null); });
@@ -249,6 +253,7 @@
     var msg = '';
     if (demDown() && (state.adj || state.shade)) msg = 'Terrain tiles could not be loaded; showing the un-adjusted data.';
     else if (state.adj && current && !current.pot) msg = 'No terrain adjustment for this layer.';
+    else if (state.adj && map && Math.round(map.getZoom()) < manifest.terrain.min_zoom) msg = 'Terrain adjustment applies from zoom level ' + manifest.terrain.min_zoom + ' (zoom in).';
     box.hidden = !msg; box.textContent = msg;
   }
 
@@ -347,10 +352,10 @@
     var i = PWPFCore.lonLatToPixel(latlng.lng, latlng.lat, manifest, mercator);
     if (i < 0) return;
     var tok = ++readTok;
-    if (adjustOn() && current.mode[i] >= 0) {
-      elevationAt(latlng).then(function (zp) { if (tok === readTok) showReadout(latlng, i, zp); },
-                               function () { if (tok === readTok) showReadout(latlng, i, null); });
-    } else showReadout(latlng, i, null);
+    showReadout(latlng, i, null);
+    if (elevationOn()) {
+      elevationAt(latlng).then(function (zp) { if (tok === readTok) showReadout(latlng, i, zp); }, function () { /* keep the plain read-out */ });
+    }
   }
 
   function showReadout(latlng, i, zp) {
@@ -361,7 +366,8 @@
       box.innerHTML = head + '<div class="big">No ' + (state.prod === 'ice' ? 'ice' : 'snow') + ' signal</div>';
       return;
     }
-    if (zp !== null && zp !== undefined) k = PWPFCore.terrainFactor(current, i, zref, zp, adj);
+    var adjusting = zp !== null && zp !== undefined && adjustHere();
+    if (adjusting) k = PWPFCore.terrainFactor(current, i, zref, zp, adj);
     var view = { mode: [current.mode[i] * k], lo: [Math.max(current.lo[i] * k, FL)], hi: [Math.max(current.hi[i] * k, FL)] };
     var thr = state.prod === 'ice' ? info.thresholds : info.thresholds.filter(function (t) { return t >= 1 && t <= 18; });
     var r = PWPFCore.pointReadout(view, 0, thr, [5, 10, 25, 50, 75, 90, 95]);
@@ -369,20 +375,82 @@
       '<tr><th>Prob.</th>' + r.probs.map(function (p) { return '<td>' + Math.round(p[1]) + '%</td>'; }).join('') + '</tr>';
     var prow = '<tr><th>Pctile</th>' + r.pcts.map(function (p) { return '<td>' + p[0] + '</td>'; }).join('') + '</tr>' +
       '<tr><th>Inches</th>' + r.pcts.map(function (p) { return '<td>' + p[1].toFixed(dec) + '</td>'; }).join('') + '</tr>';
-    var terr = (zp !== null && zp !== undefined)
-      ? '<div class="muted small">Terrain adjustment: ground ' + Math.round(zp) + ' m vs model ' + Math.round(zref[i]) + ' m → snowfall × ' + k.toFixed(2) + '</div>' : '';
+    var terr = (zp === null || zp === undefined) ? ''
+      : adjusting ? '<div class="muted small">Terrain adjustment: ground ' + Math.round(zp) + ' m vs model ' + Math.round(zref[i]) + ' m → snowfall × ' + k.toFixed(2) + '</div>'
+      : '<div class="muted small">Ground ' + Math.round(zp) + ' m' + (zref ? ' (model ' + Math.round(zref[i]) + ' m)' : '') + '</div>';
     box.innerHTML = head + '<div class="big">' + r.mode.toFixed(dec) + ' in <span class="muted small">forecast (mode)</span></div>' + terr +
       '<table>' + rows + '</table><table style="margin-top:8px">' + prow + '</table>' +
       '<div class="muted small" style="margin-top:6px">Chance of at least the amount shown; percentiles are amounts not exceeded with that probability.' +
       (state.prod === 'ice' ? ' Ice is flat (elevated horizontal) accretion from a precipitation-rate FRAM; treat as experimental.' : '') + '</div>';
   }
 
+  /* ---- cursor tooltip: exact values under the pointer, computed from the same interpolated field the map shows ---- */
+  var tipEl, tipRaf = 0, tipEvt = null, tipTok = 0, pinMarker = null, HALF = 20037508.342789244;
+  function fmtLat(v) { return Math.abs(v).toFixed(3) + '°' + (v < 0 ? 'S' : 'N'); }
+  function fmtLng(v) { return Math.abs(v).toFixed(3) + '°' + (v < 0 ? 'W' : 'E'); }
+  function tipOn(e) {
+    tipEvt = e;
+    if (!tipRaf) tipRaf = requestAnimationFrame(function () { tipRaf = 0; if (tipEvt) updateTip(tipEvt); });
+  }
+  function tipOff() { tipTok++; tipEvt = null; if (tipEl) tipEl.hidden = true; }
+  function placeTip(pt) {
+    var box = map.getContainer(), w = tipEl.offsetWidth, h = tipEl.offsetHeight, x = pt.x + 18, y = pt.y + 18;
+    if (x + w > box.clientWidth - 8) x = pt.x - w - 14;
+    if (y + h > box.clientHeight - 8) y = pt.y - h - 14;
+    tipEl.style.left = Math.max(6, x) + 'px'; tipEl.style.top = Math.max(6, y) + 'px';
+  }
+  function updateTip(e) {
+    if (!current || !tipEl) return;
+    var ll = e.latlng, R = 6378137, tok = ++tipTok;
+    var x = R * ll.lng * Math.PI / 180, y = R * Math.log(Math.tan(Math.PI / 4 + ll.lat * Math.PI / 360));
+    var z = Math.round(map.getZoom()), cellPx = mercator.px * 256 * Math.pow(2, z) / (2 * HALF) * dprScale();
+    var s = PWPFCore.sampleAt(current, mercator, x, y, cellPx >= 8, adjustOn() ? zref : null);
+    var inside = PWPFCore.lonLatToPixel(ll.lng, ll.lat, manifest, mercator) >= 0;
+    var head = '<div class="ll">' + fmtLat(ll.lat) + ', ' + fmtLng(ll.lng) + '</div>';
+    if (!s) {
+      tipEl.innerHTML = head + '<div class="val"><small>' + (inside ? 'No ' + (state.prod === 'ice' ? 'ice' : 'snow') + ' signal here' : 'Outside the forecast domain') + '</small></div>';
+      tipEl.hidden = false; placeTip(e.containerPoint);
+      if (inside && elevationOn()) elevationAt(ll).then(function (zp) { if (tok === tipTok) { tipEl.innerHTML = head + '<div class="val"><small>No ' + (state.prod === 'ice' ? 'ice' : 'snow') + ' signal here</small></div><div class="terr">Ground ' + Math.round(zp) + ' m</div>'; placeTip(e.containerPoint); } }, function () {});
+      return;
+    }
+    function draw(zp) {
+      var info = prodInfo(), prod = product(), FL = Binormal.S_FLOOR, k = 1, adjusting = false;
+      if (zp !== null && s.zr !== null && s.pot !== null && s.sl !== null && adjustHere()) {
+        k = PWPFTerrain.scale(zp, s.zr, s.sl, s.pot, s.m, PWPFTerrain.config(manifest.terrain)); adjusting = true;
+      }
+      var m = s.m * k, s1 = Math.max(s.s1 * k, FL), s2 = Math.max(s.s2 * k, FL);
+      var dec = state.prod === 'ice' ? 3 : 2, unit = state.prod === 'ice' ? 'in of ice' : 'in';
+      var pv = PWPFCore.valueOf(prod, m, s1, s2), pal = prod.kind === 'prob' ? PWPFCore.palettes.prob : PWPFCore.palettes[state.prod];
+      var bi = PWPFCore.binIndex(pal.stops, pv), sw = bi >= 0 ? '<span class="sw" style="background:' + pal.colors[bi] + '"></span>' : '<span class="sw" style="background:#fff"></span>';
+      var title = prod.kind === 'prob' ? 'Chance of at least ' + state.thr + ' in' : prod.kind === 'pct' ? 'Amount not exceeded at ' + state.pct + '% (' + state.pct + 'th percentile)' : 'Forecast (mode)';
+      var bigTxt = prod.kind === 'prob' ? pv.toFixed(1) + ' <small>%</small>' : pv.toFixed(dec) + ' <small>' + unit + '</small>';
+      var rows = '';
+      function row(a, b) { rows += '<tr><td>' + a + '</td><td>' + b + '</td></tr>'; }
+      if (prod.kind !== 'mode') row('Forecast (mode)', m.toFixed(dec) + ' in');
+      if (prod.kind !== 'prob') row('Chance ≥ ' + state.thr + ' in', (100 * Binormal.exceedance(m, s1, s2, state.thr)).toFixed(1) + ' %');
+      [10, 50, 90].forEach(function (q) { row(q + 'th percentile', Binormal.percentile(m, s1, s2, q / 100).toFixed(dec) + ' in'); });
+      var terr = zp === null ? '' : adjusting
+        ? '<div class="terr">Ground ' + Math.round(zp) + ' m vs model ' + Math.round(s.zr) + ' m → snowfall × ' + k.toFixed(2) + '</div>'
+        : '<div class="terr">Ground ' + Math.round(zp) + ' m' + (s.zr !== null ? ' (model ' + Math.round(s.zr) + ' m)' : '') + '</div>';
+      tipEl.innerHTML = head + '<div class="head">' + title + '</div><div class="val">' + sw + bigTxt + '</div><table>' + rows + '</table>' + terr;
+      tipEl.hidden = false; placeTip(e.containerPoint);
+    }
+    draw(null);
+    if (elevationOn()) elevationAt(ll).then(function (zp) { if (tok === tipTok) draw(zp); }, function () {});
+  }
+  function setPin(ll) {
+    if (!map.getPane('pin')) { map.createPane('pin'); map.getPane('pin').style.zIndex = 460; map.getPane('pin').style.pointerEvents = 'none'; }
+    if (!pinMarker) pinMarker = L.circleMarker(ll, { radius: 7, weight: 3, color: '#fff', fillColor: '#d6336c', fillOpacity: 1, interactive: false, pane: 'pin' }).addTo(map);
+    else pinMarker.setLatLng(ll);
+  }
+
   function init(m) {
     manifest = m; mercator = m.mercator;
     parseHash();
     if (!state.win || !curWin()) state.win = m.windows[0].id;
-    $('runinfo').textContent = 'Cycle ' + fmtTime(m.cycle) + ' · ' + m.members_total + ' ensemble members' +
+    $('runinfo').innerHTML = 'Cycle ' + fmtTime(m.cycle) + ' · <a href="#members" id="toMembers">' + m.members_total + ' ensemble members ↓</a>' +
       (m.members_requested && m.members_requested !== m.members_total ? ' (of ' + m.members_requested + ' requested)' : '') + ' · built ' + fmtTime(m.generated);
+    $('toMembers').onclick = function (e) { e.preventDefault(); $('members').scrollIntoView({ behavior: 'smooth', block: 'start' }); };   // (the URL hash is the viewer state)
     $('about').innerHTML = '<b>Notice.</b> ' + m.notice + ' Methodology: multi-model ensemble → QPF (PRISM-downscaled) × precipitation type × SLR → binormal fit (mode = ' +
       m.mode_method + ' forecast, variance from the ensemble). Freezing rain: simplified FRAM ice-to-liquid ratio.' +
       (m.terrain && m.terrain.enabled ? ' <b>Terrain adjustment</b> (browser-side, optional): snowfall is rescaled at each map pixel for the ground elevation from AWS Terrain Tiles relative to the 2.5 km model terrain — an elevation gradient (+' + Math.round(100 * m.terrain.precip_gradient_per_km) + "%/km, limited) and the rain/snow line at the model snow level; never more than all the liquid falling as snow. These are our assumptions, not part of WPC\'s method." : '') +
@@ -392,8 +460,14 @@
     buildMembers(); skipNote();
     buildControls();
     syncShade();
-    map.on('mousemove', function (e) { readout(e.latlng); });
-    map.on('click', function (e) { state.pt = e.latlng; readout(e.latlng); writeHash(); });
+    window.__pwpfMap = map;                                   // handle for debugging and browser tests
+    tipEl = $('tip');
+    map.on('mousemove', tipOn);
+    map.on('mouseout', tipOff);
+    map.on('movestart zoomstart', tipOff);
+    map.on('zoomend', terrainNote);
+    map.on('click', function (e) { state.pt = e.latlng; setPin(e.latlng); readout(e.latlng); tipOn(e); writeHash(); });
+    if (state.pt) setPin(state.pt);
     redraw();
   }
 
@@ -407,29 +481,55 @@
     { name: 'USGS Topo', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
       attr: 'Basemap courtesy of the U.S. Geological Survey', native: 16 }
   ];
-  /* Administrative boundaries drawn above the data (pane z 440, below the basemap's place labels at 450):
-     international borders, state lines, and county lines (only from zoom 6).  Data: web/borders/*.json. */
+  /* Boundaries drawn above the data (below the basemap's place labels, pane z 450), styled as a cartographic hierarchy:
+       country borders  heaviest, near-black, white casing        coastlines + lake shores  thin dark blue-grey, light casing
+       state lines       medium, dark grey, light casing          county lines (zoom 6+)    hairline mid-grey, no casing
+     Widths grow with zoom (linear between the two zoom stops) so the hierarchy holds from the continental view to street
+     level; the casing keeps the lines legible over every colour of the data ramp.  Data: web/borders/*.json. */
+  function lerpZ(z, z0, w0, z1, w1) { var t = Math.max(0, Math.min(1, (z - z0) / (z1 - z0))); return w0 + (w1 - w0) * t; }
+  var BORDER_DEFS = [          // drawn in this order: later = on top
+    { key: 'counties',  label: 'County lines (zoom 6+)',  minZoom: 6, color: '#5b6571', opacity: 0.6,  w: function (z) { return lerpZ(z, 6, 0.5, 12, 1.1); } },
+    { key: 'states',    label: 'State lines',             color: '#2e3744', opacity: 0.88, w: function (z) { return lerpZ(z, 3, 0.9, 11, 2.1); },
+      casing: { color: '#ffffff', opacity: 0.5, extra: 1.8 } },
+    { key: 'coast_minor', label: 'Small islands & lakes (zoom 6+)', minZoom: 6, color: '#2a4a68', opacity: 0.75, w: function (z) { return lerpZ(z, 6, 0.5, 12, 1.1); } },
+    { key: 'coast',     label: 'Coastlines & lake shores', color: '#17324d', opacity: 0.92, w: function (z) { return lerpZ(z, 3, 0.7, 11, 1.6); },
+      casing: { color: '#ffffff', opacity: 0.4, extra: 1.5 } },
+    { key: 'countries', label: 'Country borders',         color: '#0a0e14', opacity: 0.96, w: function (z) { return lerpZ(z, 3, 1.7, 11, 3.4); },
+      casing: { color: '#ffffff', opacity: 0.6, extra: 2.6 } }
+  ];
   function setupBorders(ctl) {
-    map.createPane('borders'); map.getPane('borders').style.zIndex = 440; map.getPane('borders').style.pointerEvents = 'none';
-    var rend = L.canvas({ pane: 'borders' }), internal = false;
-    var defs = [
-      { key: 'countries', label: 'Country borders', style: { color: '#161616', weight: 1.9, opacity: 0.9 } },
-      { key: 'states', label: 'State lines', style: { color: '#2b2b2b', weight: 1.1, opacity: 0.8 } },
-      { key: 'counties', label: 'County lines (zoom 6+)', style: { color: '#4a4a4a', weight: 0.6, opacity: 0.55 }, minZoom: 6 }
-    ];
-    defs.forEach(function (d) {
-      d.layer = L.geoJSON(null, { pane: 'borders', renderer: rend, style: d.style, interactive: false });
+    function pane(name, z) { map.createPane(name); map.getPane(name).style.zIndex = z; map.getPane(name).style.pointerEvents = 'none'; }
+    pane('bcase', 430);
+    var caseRend = L.canvas({ pane: 'bcase' }), internal = false, defs = BORDER_DEFS;
+    defs.forEach(function (d, i) {
+      pane('b-' + d.key, 436 + i);
+      d.line = L.geoJSON(null, { pane: 'b-' + d.key, renderer: L.canvas({ pane: 'b-' + d.key }), interactive: false,
+        style: { color: d.color, opacity: d.opacity, weight: d.w(map.getZoom()), lineCap: 'round', lineJoin: 'round' } });
+      var parts = [d.line];
+      if (d.casing) {
+        d.case = L.geoJSON(null, { pane: 'bcase', renderer: caseRend, interactive: false,
+          style: { color: d.casing.color, opacity: d.casing.opacity, weight: d.w(map.getZoom()) + d.casing.extra, lineCap: 'round', lineJoin: 'round' } });
+        parts.unshift(d.case);
+      }
+      d.layer = L.layerGroup(parts);
       d.on = true;
       ctl.addOverlay(d.layer, d.label);
       fetch('borders/' + d.key + '.json').then(function (r) { return r.json(); })
-        .then(function (g) { d.layer.addData({ type: 'Feature', properties: {}, geometry: g }); })
-        .catch(function () { /* borders are cosmetic; ignore a missing file */ });
+        .then(function (g) {
+          var f = { type: 'Feature', properties: {}, geometry: g };
+          if (d.case) d.case.addData(f);
+          d.line.addData(f);
+        }).catch(function () { /* borders are cosmetic; ignore a missing file */ });
     });
+    window.__pwpfDefs = defs;
     function of(layer) { return defs.filter(function (d) { return d.layer === layer; })[0]; }
     function sync() {
       internal = true;
+      var z = map.getZoom();
       defs.forEach(function (d) {
-        var show = d.on && (!d.minZoom || map.getZoom() >= d.minZoom), has = map.hasLayer(d.layer);
+        d.line.setStyle({ weight: d.w(z) });
+        if (d.case) d.case.setStyle({ weight: d.w(z) + d.casing.extra });
+        var show = d.on && (!d.minZoom || z >= d.minZoom), has = map.hasLayer(d.layer);
         if (show && !has) map.addLayer(d.layer); else if (!show && has) map.removeLayer(d.layer);
       });
       internal = false;

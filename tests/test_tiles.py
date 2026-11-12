@@ -62,3 +62,12 @@ def test_field_and_dense_tile_speed(rep):
     assert np.allclose(rep["field"], exp, atol=2e-3)
     assert rep["dense_pixels"] > 100_000 and rep["dense_terrain_pixels"] > 100_000
     assert rep["dense_bicubic_ms"] < 600 and rep["dense_terrain_ms"] < 900      # 512 x 512 retina tile
+
+
+def test_cursor_sampling_agrees_with_the_painted_tile(rep):
+    for interp, n, bad in rep["sample_vs_render"]:
+        assert n > 100 and bad <= 1, (interp, n, bad)           # same interpolation -> same class (allow 1 float-rounding edge)
+    assert rep["sample_outside"] is None
+    m, expect, zr, pot, sl = rep["sample_centre"]
+    assert m == pytest.approx(expect, rel=1e-5) and (zr, pot, round(sl)) == (321, 500, 1200)
+    assert rep["value_of"][0] == 2.5 and rep["value_of"][1] > 99 and rep["value_of"][2] > 0

@@ -80,6 +80,35 @@ const timed = (o) => { const t0 = Date.now(); const r = Core.renderTile(Object.a
 const t1 = timed({ interp: 'bicubic' }), t2 = timed({ interp: 'bicubic', dem, zref: bzref, adjust: cfg });
 out.dense_bicubic_ms = t1[0]; out.dense_terrain_ms = t2[0]; out.dense_pixels = t1[1]; out.dense_terrain_pixels = t2[1];
 
+
+// --- sampleAt (cursor tooltip) agrees with what renderTile paints at the same spot
+{
+  const m2 = Float32Array.from({ length: W * H }, (_, i) => 3 + 40 * Math.exp(-(((i % W) - 12) ** 2 + (Math.floor(i / W) - 10) ** 2) / 30));
+  const p2 = mkParams(W, H, m2, { pot: new Float32Array(W * H).fill(500), sl: new Float32Array(W * H).fill(1200) });
+  p2.lo.fill(0.4); p2.hi.fill(0.9);
+  const zz = 11, tt = { tx, ty };
+  const palS = Core.palettes.snow, test = [];
+  for (const interp of ['bilinear', 'bicubic']) {
+    const rr = Core.renderTile({ params: p2, merc, pal: palS, product: { kind: 'pct', q: 50 }, alpha: 1, z: zz, tx, ty, size, scale: 1, interp });
+    let bad = 0, n = 0;
+    for (let py2 = 3; py2 < size; py2 += 17) for (let px2 = 3; px2 < size; px2 += 19) {
+      const x = ((tx * size + px2 + 0.5) / (size * Math.pow(2, zz))) * 2 * HALF - HALF, y = HALF - ((ty * size + py2 + 0.5) / (size * Math.pow(2, zz))) * 2 * HALF;
+      const sm = Core.sampleAt(p2, merc, x, y, interp === 'bicubic', null);
+      const o = (py2 * size + px2) * 4, c = [rr[o], rr[o + 1], rr[o + 2], rr[o + 3]];
+      const expectCls = sm ? Core.binIndex(palS.stops, Core.valueOf({ kind: 'pct', q: 50 }, sm.m, sm.s1, sm.s2)) : -1;
+      const gotCls = c[3] ? palS.rgb.findIndex(r => r[0] === c[0] && r[1] === c[1] && r[2] === c[2]) : -1;
+      n++; if (expectCls !== gotCls) bad++;
+    }
+    test.push([interp, n, bad]);
+  }
+  out.sample_vs_render = test;
+  out.sample_outside = Core.sampleAt(p2, merc, merc.xmin - 5 * merc.px, merc.ymax - 3 * merc.px, false, null);
+  const cx = merc.xmin + (3 + 0.5) * merc.px, cy = merc.ymax - (4 + 0.5) * merc.px;       // exactly at a cell centre
+  const sc2 = Core.sampleAt(p2, merc, cx, cy, false, new Float32Array(W * H).fill(321));
+  out.sample_centre = [sc2.m, p2.mode[4 * W + 3], sc2.zr, sc2.pot, sc2.sl];
+  out.value_of = [Core.valueOf({ kind: 'mode' }, 2.5, 1, 2), Core.valueOf({ kind: 'prob', t: 0 }, 2.5, 1, 2), Core.valueOf({ kind: 'pct', q: 50 }, 2.5, 1, 2)];
+}
+
 // field() on decoded params
 const p6 = { n: 6, mode: Float32Array.from([0, 2, 4, 8, 0.01, 12]), lo: Float32Array.from([0.05, 0.5, 1, 2, 0.05, 3]),
              hi: Float32Array.from([0.05, 0.8, 2, 3, 0.05, 4]), zeroMode: 0.05, zeroHi: 0.1 };

@@ -147,6 +147,47 @@
     return out;
   }
 
+  /* Parameters at an exact Web-Mercator position (metres), interpolated exactly like renderTile does for a pixel centre
+     (bilinear, or Catmull-Rom when `cubic`): {m, s1, s2, zr, pot, sl}, with zr/pot/sl null where unavailable.
+     Returns null outside the grid or where there is no signal.  Used by the cursor tooltip. */
+  function sampleAt(P, merc, x, y, cubic, zref) {
+    var W = P.W, H = P.H, FL = Binormal.S_FLOOR, g = (x - merc.xmin) / merc.px - 0.5, h = (merc.ymax - y) / merc.px - 0.5;
+    var i = Math.floor(g), j = Math.floor(h), fx = g - i, fy = h - j;
+    if (i < -1 || i >= W || j < -1 || j >= H) return null;
+    var c = [i >= 0 && j >= 0 ? j * W + i : -1, i + 1 < W && j >= 0 ? j * W + i + 1 : -1,
+             i >= 0 && j + 1 < H ? (j + 1) * W + i : -1, i + 1 < W && j + 1 < H ? (j + 1) * W + i + 1 : -1], k;
+    var live = false;
+    for (k = 0; k < 4; k++) if (c[k] >= 0 && (P.mode[c[k]] >= P.zeroMode || P.hi[c[k]] >= P.zeroHi)) live = true;
+    if (!live) return null;
+    var w = [(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy], m, s1, s2;
+    if (cubic && i >= 1 && i + 2 < W && j >= 1 && j + 2 < H) {
+      var wx = [0, 0, 0, 0], wy = [0, 0, 0, 0], a, b;
+      catmull(fx, wx); catmull(fy, wy);
+      m = s1 = s2 = 0;
+      for (b = 0; b < 4; b++) for (a = 0; a < 4; a++) {
+        var cc = (j - 1 + b) * W + i - 1 + a, wt = wy[b] * wx[a];
+        m += wt * P.mode[cc]; s1 += wt * P.lo[cc]; s2 += wt * P.hi[cc];
+      }
+      if (m < 0) m = 0; if (s1 < FL) s1 = FL; if (s2 < FL) s2 = FL;
+    } else {
+      m = s1 = s2 = 0;
+      for (k = 0; k < 4; k++) { m += c[k] >= 0 ? w[k] * P.mode[c[k]] : 0; s1 += w[k] * (c[k] >= 0 ? P.lo[c[k]] : FL); s2 += w[k] * (c[k] >= 0 ? P.hi[c[k]] : FL); }
+    }
+    if (m < P.zeroMode && s2 < P.zeroHi) return null;
+    var out = { m: m, s1: s1, s2: s2, zr: null, pot: null, sl: null };
+    if (c[0] >= 0 && c[1] >= 0 && c[2] >= 0 && c[3] >= 0) {
+      var mix = function (arr) { return arr ? w[0] * arr[c[0]] + w[1] * arr[c[1]] + w[2] * arr[c[2]] + w[3] * arr[c[3]] : null; };
+      out.zr = mix(zref); out.pot = mix(P.pot); out.sl = mix(P.sl);
+    }
+    return out;
+  }
+
+  /* Value of a product ('prob' %, 'pct' in, 'mode' in) for distribution parameters. */
+  function valueOf(product, m, s1, s2) {
+    return product.kind === 'prob' ? 100 * Binormal.exceedance(m, s1, s2, product.t)
+         : product.kind === 'pct' ? Binormal.percentile(m, s1, s2, product.q / 100) : m;
+  }
+
   /* Factor the terrain adjustment applies at one data cell for a point at elevation zp (read-outs). */
   function terrainFactor(params, i, zref, zp, adj) {
     if (!adj || !zref || !params.pot || !params.sl) return 1;
@@ -170,6 +211,6 @@
     return row * w + col;
   }
 
-  return { palettes: palettes, binIndex: binIndex, paramsFromBin: paramsFromBin, field: field, renderTile: renderTile,
+  return { palettes: palettes, binIndex: binIndex, paramsFromBin: paramsFromBin, field: field, renderTile: renderTile, sampleAt: sampleAt, valueOf: valueOf,
            terrainFactor: terrainFactor, pointReadout: pointReadout, lonLatToPixel: lonLatToPixel };
 });

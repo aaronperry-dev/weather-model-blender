@@ -153,6 +153,7 @@ class Limiter:
 
     def __init__(self, rate: float, burst: int, clock=time.monotonic, sleep=time.sleep):
         self.rate, self.burst = float(rate), float(burst)
+        self.base_rate = self.rate                 # `rate` moves between base_rate/8 and base_rate (see throttled/succeeded)
         self._tokens, self._t = float(burst), clock()
         self._clock, self._sleep, self._lock = clock, sleep, threading.Lock()
 
@@ -166,6 +167,17 @@ class Limiter:
         if wait > 0:
             self._sleep(wait)
         return wait
+
+    def throttled(self) -> None:
+        """Multiplicative decrease: every throttle answer halves the allowed rate (down to 1/8 of the base rate)."""
+        with self._lock:
+            self.rate = max(self.base_rate / 8.0, self.rate * 0.5)
+
+    def succeeded(self) -> None:
+        """Additive increase: the rate creeps back to the base rate (full recovery after ~50 good requests)."""
+        with self._lock:
+            if self.rate < self.base_rate:
+                self.rate = min(self.base_rate, self.rate + self.base_rate * 0.02)
 
     def penalise(self, seconds: float, max_debt_s: float = 60.0) -> None:
         """The server pushed back: owe it `seconds` of silence.  Every thread sharing this bucket waits (the debt is
@@ -209,7 +221,7 @@ def policy_for(url: str) -> Policy:
     elif host == "dd.weather.gc.ca":                  # MSC Datamart (no published rate limit): stay modest
         key, mk = "msc", lambda: Policy("msc", 2.0, 4, 2)
     elif host.startswith("ecmwf-forecasts.s3"):       # ECMWF open-data mirror: answered 503 under 4 parallel pulls
-        key, mk = host, lambda: Policy(host, 4.0, 8, 2)
+        key, mk = host, lambda: Policy(host, 3.0, 6, 2)
     elif host.startswith("noaa-") and host.endswith(".amazonaws.com"):     # NOAA open-data buckets
         key, mk = host, lambda: Policy(host, 20.0, 40, 6)
     elif host.endswith(".amazonaws.com"):
@@ -328,9 +340,12 @@ def _request(url: str, headers=None, stream: bool = False, timeout=None):
                     pol.consecutive = 0
             wait = _backoff(attempt, r.headers.get("Retry-After"))
             r.close()
+            pol.limiter.throttled()                                      # slow the whole host down, not just this thread
+            pol.limiter.penalise(min(wait, THROTTLE_PENALTY_S))
             if attempt == RETRIES:
                 break
-            log.info("%s answered %s; waiting %.0f s before retrying %s", pol.key, last, wait, url)
+            log.info("%s answered %s; waiting %.0f s before retrying (allowed rate now %.2f/s) %s", pol.key, last, wait,
+                     pol.limiter.rate, url)
             time.sleep(wait)
             continue
         if r.status_code in (500, 502, 504):                             # transient server trouble, not a throttle
@@ -342,6 +357,7 @@ def _request(url: str, headers=None, stream: bool = False, timeout=None):
             continue
         with pol.lock:
             pol.consecutive = 0
+        pol.limiter.succeeded()
         if not stream:
             STATS.add(pol.key, bytes=len(r.content))
         return r
@@ -366,7 +382,10 @@ def mount_polite(session) -> None:
             resp = super().send(request, **kw)
             if resp.status_code in pol.throttle_codes:
                 STATS.add(pol.key, throttled=1)
+                pol.limiter.throttled()
                 pol.limiter.penalise(THROTTLE_PENALTY_S)
+            elif resp.status_code < 400:
+                pol.limiter.succeeded()
             return resp
 
     for scheme in ("https://", "http://"):

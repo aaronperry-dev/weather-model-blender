@@ -3,21 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Probabilistic Snowfall Guidance (unofficial PWPF-style)</title>
+<title>Legacy WPC PWPF Redux</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <div>
-    <h1>Probabilistic Snowfall Guidance <span class="tag">unofficial · PWPF-style</span></h1>
+  <div class="titlewrap">
+    <h1>Legacy WPC PWPF Redux</h1>
+    <div class="subtitle">Probabilistic snowfall &amp; freezing-rain guidance, rebuilt from public model data in the style of WPC's retired 2.5&nbsp;km PWPF <span class="tag">unofficial</span></div>
     <div id="runinfo">loading…</div>
   </div>
 </header>
 
 <main>
   <div id="left">
-    <div id="map"></div>
+    <div id="map"><div id="tip" role="tooltip" hidden></div></div>
     <section id="members" class="members">
       <h2>Ensemble members used in this blend</h2>
       <div id="membersSummary" class="muted small">loading…</div>
@@ -47,9 +48,9 @@
     <section>
       <h2>Product</h2>
       <div class="chips" id="products">
-        <button data-kind="prob" class="on">Probability ≥</button>
+        <button data-kind="mode" class="on">Forecast (mode)</button>
+        <button data-kind="prob">Probability ≥</button>
         <button data-kind="pct">Percentile</button>
-        <button data-kind="mode">Forecast (mode)</button>
       </div>
       <label id="thrRow"><span id="thrLabel">Snowfall at least</span>
         <select id="thr"></select> inches</label>
@@ -58,14 +59,14 @@
       <label>Overlay opacity <input id="opacity" type="range" min="0.2" max="1" step="0.05" value="0.85"></label>
       <div id="terrainBox" hidden>
         <label class="chk"><input type="checkbox" id="terrainAdj" checked> Terrain adjustment (AWS terrain tiles)</label>
-        <label class="chk" id="shadeRow"><input type="checkbox" id="shade"> Terrain shading</label>
+        <label class="chk" id="shadeRow"><input type="checkbox" id="shade" checked> Terrain shading</label>
         <div id="terrainNote" class="warn small" hidden></div>
       </div>
     </section>
 
     <section id="readout">
       <h2>Point forecast</h2>
-      <div class="muted">Move the pointer over the map (or tap).</div>
+      <div class="muted">Hover the map for quick values; click to pin a full point forecast here.</div>
     </section>
 
     <section>

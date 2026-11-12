@@ -381,6 +381,7 @@ class IfsSource(Source):
                 try:
                     client = Client(source=mirror, maximum_retries=3, retry_after=[5, 20, 2])
                     nh.mount_polite(client.session)                    # the index requests go through the rate limit too
+                    self._cache_indexes(client)                        # ... and are made once per file, not once per member
                     if hasattr(client, "_get_urls"):
                         self._download_ranges(client, req, target, got)
                     else:                                              # pragma: no cover - other client versions
@@ -402,6 +403,37 @@ class IfsSource(Source):
                         IfsSource._fails[mirror] = IfsSource._fails.get(mirror, 0) + 1
             raise nh.FetchError(f"ECMWF open data request failed on every mirror ({' | '.join(errors)}); "
                                 f"request={ {k: v for k, v in req.items() if k != 'target'} }")
+
+    _index_cache: dict = {}                   # index URL -> bytes: identical for every member of a run
+    _index_lock = threading.Lock()
+    _index_locks: dict = {}
+
+    @classmethod
+    def _cache_indexes(cls, client) -> None:
+        """Every member download asks for the same `<file>.index`; fetch each one a single time per run (other threads
+        wait for the first fetch instead of repeating it) - hundreds fewer requests to the bucket."""
+        import requests
+        orig = client.session.get
+
+        def get(url, **kw):
+            if not str(url).endswith(".index"):
+                return orig(url, **kw)
+            with cls._index_lock:
+                lock = cls._index_locks.setdefault(url, threading.Lock())
+            with lock:
+                body = cls._index_cache.get(url)
+                if body is None:
+                    r = orig(url, **kw)
+                    if r.status_code != 200:
+                        return r                                  # errors are not cached
+                    body = r.content
+                    with cls._index_lock:
+                        cls._index_cache[url] = body
+                resp = requests.Response()
+                resp.status_code, resp.url, resp._content = 200, url, body
+                return resp
+
+        client.session.get = get
 
     @staticmethod
     def _not_published(e: Exception) -> bool:
