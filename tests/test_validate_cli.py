@@ -31,7 +31,7 @@ def _full(a):
 
 def test_validate_compare_and_calibrate(tmp_path, monkeypatch):
     res, npz = _small_run(tmp_path)
-    w = res.windows["d1"]
+    w = res.windows["s24_f024"]
     m, lo, hi = w["mode"], w["s_lo"], w["s_hi"]
     wpc = tmp_path / "wpc"
     wpc.mkdir()
@@ -48,12 +48,12 @@ def test_validate_compare_and_calibrate(tmp_path, monkeypatch):
         return _full((100 * binormal.exceedance(m, lo, hi, 4.0)).astype(np.float32))            # percent
 
     monkeypatch.setattr(validate, "read_grib", fake_read)
-    rep = validate.compare(str(npz), str(wpc), "d1", datetime(2026, 1, 15, 12), 24)
+    rep = validate.compare(str(npz), str(wpc), "s24_f024", datetime(2026, 1, 15, 12), 24)
     assert rep["percentiles"][50]["rmse"] < 1e-3 and rep["percentiles"][50]["n"] > 0
     assert rep["probabilities"][4.0]["mae_prob"] < 1e-4
     # WPC (fake) 50 % heavier than ours -> calibration suggests ~1.5
     monkeypatch.setattr(validate, "read_grib", lambda p: fake_read(p) * 1.5)
-    adj = validate.calibrate_slr(str(npz), str(wpc), "d1", datetime(2026, 1, 15, 12), 24, 1.0)
+    adj = validate.calibrate_slr(str(npz), str(wpc), "s24_f024", datetime(2026, 1, 15, 12), 24, 1.0)
     assert 1.4 < adj < 1.6
 
 
@@ -61,4 +61,5 @@ def test_point_cli_prints_every_window(tmp_path, capsys):
     res, npz = _small_run(tmp_path)
     cli.main(["point", "--npz", str(npz), "--lat", "40.0", "--lon", "-105.0"])
     out = capsys.readouterr().out
-    assert out.count("mode") == 5 and "percentiles" in out
+    assert out.count(" mode ") >= 15 and "percentiles" in out
+    assert "s72_f072:" in out

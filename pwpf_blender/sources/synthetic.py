@@ -17,6 +17,7 @@ from ..member import StepFields
 from .base import Source, SourceGrid
 
 P_LEVELS = (1000, 925, 850, 700, 500)
+WARM_NOSE_C = 6.0        # degC added at 925/850 hPa along a band near 39.5N: sleet / freezing rain under it
 
 
 def synthetic_terrain(lon, lat):
@@ -86,15 +87,19 @@ class SyntheticSource(Source):
             t2m = (9.0 - 0.9 * (lat - 35.0) - 0.0065 * self._terrain + dT + diurnal
                    - 2.5 * np.clip(shield, 0, 1)).astype(np.float32)
             zsfc = self._terrain
+            nose = np.exp(-(((lat - (39.5 + 0.1 * dxm)) / 1.1) ** 2)) * (shield > 0.15) if WARM_NOSE_C else 0.0
             psfc = (1013.25 * np.exp(-zsfc / 8400.0)).astype(np.float32)
             levels = {}
             for p in P_LEVELS:
                 zstd = 44330.0 * (1 - (p / 1013.25) ** 0.1903)
-                tp = t2m - 0.0065 * np.maximum(zstd - zsfc, 0) + (3.0 if p == 925 else 0.0) * (lat > 37) * 0
+                tp = t2m - 0.0065 * np.maximum(zstd - zsfc, 0)
+                if p in (925, 850):                              # warm nose -> a freezing-rain band
+                    tp = tp + WARM_NOSE_C * nose
                 levels[p] = {"t": tp.astype(np.float32),
                              "rh": np.where(shield > 0.1, 96.0, 65.0).astype(np.float32),
                              "z": np.full(lat.shape, zstd, np.float32)}
             steps.append(StepFields(valid=t, qpf_mm=qpf, t2m_c=t2m, psfc_hpa=psfc, levels=levels,
-                                    rh2m=np.where(shield > 0.1, 95.0, 70.0).astype(np.float32), z_sfc_m=zsfc))
+                                    rh2m=np.where(shield > 0.1, 95.0, 70.0).astype(np.float32), z_sfc_m=zsfc,
+                                    dt_h=float(self.step_hours)))
             t += timedelta(hours=self.step_hours)
         return steps

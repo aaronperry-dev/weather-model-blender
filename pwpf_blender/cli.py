@@ -14,7 +14,7 @@ from . import binormal
 from .config import load_config
 from .export import save_npz, write_site
 from .grid import GridSpec
-from .pipeline import Pipeline, day_starts
+from .pipeline import Pipeline, window_specs
 
 
 def _parse_cycle(s: str, cfg: dict) -> datetime:
@@ -60,9 +60,10 @@ def cmd_run(a):
     cycle = _parse_cycle(a.cycle, cfg)
     ext = None
     if a.external_snow:
-        from .external import load_ndfd_days
+        from .external import load_ndfd_windows
         cfg.setdefault("mode", {})["method"] = "external"
-        ext = load_ndfd_days(a.external_snow, day_starts(cycle), grid.stride)
+        ext = load_ndfd_windows(a.external_snow, [w for w in window_specs(cfg, cycle) if w.length_h == 24],
+                                grid.stride)
     logging.info("grid %dx%d (stride %d), cycle %s", grid.nx, grid.ny, grid.stride, cycle)
     pipe = Pipeline(cfg, grid, terrain, prism, ext)
     res = pipe.run(cycle)
@@ -87,14 +88,14 @@ def cmd_diagnose(a):
 def cmd_validate(a):
     from . import validate
     cycle = datetime.fromisoformat(a.cycle).replace(tzinfo=None)
-    starts = day_starts(cycle)
-    for i, wid in enumerate(("d1", "d2", "d3")):
-        end_fhr = int((starts[i] + timedelta(hours=24) - cycle).total_seconds() / 3600)
-        rep = validate.compare(a.ours, a.wpc_dir, wid, cycle, end_fhr)
-        print(json.dumps(rep, indent=1))
+    z = np.load(a.ours, allow_pickle=False)
+    wins = [w for w in json.loads(str(z["meta"]))["windows"] if w.startswith("s24_")]
+    for wid in sorted(wins):
+        end_fhr = int(wid.split("_f")[1])
+        print(json.dumps(validate.compare(a.ours, a.wpc_dir, wid, cycle, end_fhr), indent=1))
     if a.calibrate_slr:
-        end_fhr = int((starts[0] + timedelta(hours=24) - cycle).total_seconds() / 3600)
-        v = validate.calibrate_slr(a.ours, a.wpc_dir, "d1", cycle, end_fhr, a.current_adjust)
+        wid = "s24_f024"
+        v = validate.calibrate_slr(a.ours, a.wpc_dir, wid, cycle, 24, a.current_adjust)
         print("suggested slr.adjust:", v)
 
 
@@ -111,6 +112,11 @@ def cmd_point(a):
         pc = {q: round(float(binormal.percentile(m, lo, hi, q / 100)), 1) for q in (5, 10, 25, 50, 75, 90, 95)}
         pr = {t: round(float(binormal.exceedance(m, lo, hi, t)) * 100) for t in (1, 2, 4, 6, 8, 12, 18)}
         print(f"{wid}: mode {m:.1f} in | percentiles {pc} | P(>=in) % {pr}")
+        if wid in meta.get("ice_windows", []):
+            m, lo, hi = (float(z[f"{wid}_ice_{k}"][i, j]) for k in ("mode", "s_lo", "s_hi"))
+            pc = {q: round(float(binormal.percentile(m, lo, hi, q / 100)), 2) for q in (5, 25, 50, 75, 95)}
+            pr = {t: round(float(binormal.exceedance(m, lo, hi, t)) * 100) for t in (0.01, 0.1, 0.25)}
+            print(f"{wid} ice: mode {m:.2f} in | percentiles {pc} | P(>=in) % {pr}")
 
 
 def main(argv=None):

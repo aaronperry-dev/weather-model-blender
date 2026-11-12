@@ -91,21 +91,53 @@ def rtma_urls(t: datetime) -> tuple[str, ...]:
     return (f"https://noaa-rtma-pds.s3.amazonaws.com/rtma2p5.{d}/{name}", f"{RTMA_NOMADS}/rtma2p5.{d}/{name}")
 
 
-def _check_terrain(arr: np.ndarray, grid_full: GridSpec, grid_info=None) -> np.ndarray:
-    """Validate shape/range and make sure row 0 is the southern edge like GridSpec (flip if needed)."""
+class GridMismatch(ValueError):
+    """The decoded grid cannot be mapped onto the NDFD CONUS grid (deterministic: retrying other hours won't help)."""
+
+
+def _wrap_lon(lon):
+    return ((np.asarray(lon) + 180.0) % 360.0) - 180.0
+
+
+def _fit_to_ndfd(arr: np.ndarray, info, grid_full: GridSpec, tol_deg: float = 0.02) -> np.ndarray:
+    """Return `arr` on the NDFD CONUS window.
+
+    RTMA ``*_ndfd.grb2_wexp`` files are on an *expanded* NDFD grid (same projection and spacing, extra rows and
+    columns around the CONUS grid; 1597 x 2345 in 2026), so the CONUS window is located by latitude/longitude.  Also
+    handles rows stored north-to-south.  Raises GridMismatch if the geometry does not line up within `tol_deg`."""
+    if info is None or info.lat.ndim != 2:
+        if arr.shape != grid_full.shape:
+            raise GridMismatch(f"terrain shape {arr.shape} != NDFD grid {grid_full.shape} and no 2-D lat/lon to match")
+        return arr
+    lon_t, lat_t = grid_full.lonlat()
+    lat, lon = info.lat, _wrap_lon(info.lon)
+    if lat[0, 0] > lat[-1, 0]:                                    # north-first scan: flip to south-first
+        arr, lat, lon = arr[::-1], lat[::-1], lon[::-1]
+    ny, nx = grid_full.shape
+    coslat = np.cos(np.radians(lat_t[0, 0]))
+    d2 = (lat - lat_t[0, 0]) ** 2 + (_wrap_lon(lon - _wrap_lon(lon_t[0, 0])) * coslat) ** 2
+    i0, j0 = (int(v) for v in np.unravel_index(np.argmin(d2), d2.shape))
+    if i0 + ny > arr.shape[0] or j0 + nx > arr.shape[1]:
+        raise GridMismatch(f"NDFD window ({ny}x{nx}) starting at source index ({i0},{j0}) does not fit the "
+                           f"decoded grid {arr.shape}")
+    err_lat = float(np.abs(lat[i0:i0 + ny, j0:j0 + nx] - lat_t).max())
+    err_lon = float(np.abs(_wrap_lon(lon[i0:i0 + ny, j0:j0 + nx] - lon_t)).max())
+    if max(err_lat, err_lon) > tol_deg:
+        raise GridMismatch(f"decoded grid {arr.shape} does not line up with the NDFD grid at offset ({i0},{j0}): "
+                           f"max lat error {err_lat:.4f} deg, lon error {err_lon:.4f} deg (tolerance {tol_deg})")
+    if arr.shape != grid_full.shape:
+        log.info("terrain: cropped %s source grid to NDFD window at offset (rows %d, cols %d)", arr.shape, i0, j0)
+    return arr[i0:i0 + ny, j0:j0 + nx]
+
+
+def _check_terrain(arr: np.ndarray, grid_full: GridSpec, min_finite: float = 0.95) -> np.ndarray:
+    """Validate shape and plausibility; NaN (outside the source domain) becomes 0 m."""
     if arr.shape != grid_full.shape:
         raise ValueError(f"terrain shape {arr.shape} != NDFD grid {grid_full.shape}")
-    if grid_info is not None and grid_info.lat.ndim == 2:
-        lon, lat = grid_full.lonlat()
-        if abs(grid_info.lat[0, 0] - lat[0, 0]) > 0.1 and abs(grid_info.lat[-1, 0] - lat[0, 0]) < 0.1:
-            log.info("terrain rows are north-to-south; flipping to match the NDFD grid")
-            arr = arr[::-1].copy()
-        elif abs(grid_info.lat[0, 0] - lat[0, 0]) > 0.1:
-            raise ValueError(f"terrain grid corner lat {grid_info.lat[0, 0]:.3f} does not match NDFD {lat[0, 0]:.3f}")
     ok = np.isfinite(arr)
-    if ok.mean() < 0.95 or np.nanmin(arr) < -200 or np.nanmax(arr) > 6000:
-        raise ValueError(f"terrain values implausible: finite={ok.mean():.2f} min={np.nanmin(arr):.0f} "
-                         f"max={np.nanmax(arr):.0f}")
+    if ok.mean() < min_finite or np.nanmin(arr) < -200 or np.nanmax(arr) > 6000:
+        raise ValueError(f"terrain values implausible: finite={ok.mean():.2f} (need >= {min_finite}) "
+                         f"min={np.nanmin(arr):.0f} max={np.nanmax(arr):.0f}")
     return np.where(ok, arr, 0.0).astype(np.float32)
 
 
@@ -117,11 +149,13 @@ def terrain_from_rtma(grid_full: GridSpec, when: datetime | None = None, lookbac
         t = when - timedelta(hours=back)
         try:
             f, grid, url = nh.fetch_fields(rtma_urls(t), TERRAIN_PAT, want_grid=True)
-            arr = _check_terrain(next(iter(f.values())), grid_full, grid)
+            arr = _check_terrain(_fit_to_ndfd(next(iter(f.values())), grid, grid_full), grid_full)
             log.info("terrain: RTMA %s (%s)", url, next(iter(f)))
             return arr
         except nh.NoMatch:
             raise                                       # inventory readable but no terrain record: retrying won't help
+        except GridMismatch as e:
+            raise nh.FetchError(f"RTMA terrain grid cannot be mapped to the NDFD grid: {e}") from e
         except (nh.FetchError, ValueError) as e:
             errors.append(f"{t:%Y-%m-%d %HZ}: {e}")
     raise nh.FetchError("RTMA terrain unavailable for the last %d hours:\n  %s" % (lookback_h, "\n  ".join(errors[:6])))
@@ -144,8 +178,8 @@ def terrain_from_rrfs(grid_full: GridSpec, when: datetime | None = None) -> np.n
         z = next(iter(f.values()))
         lon, lat = grid_full.lonlat()
         out = Regridder.build(grid.lat, grid.lon, lat, lon)(z)
-        log.warning("terrain: using RRFS 3 km orography from %s (RTMA has no terrain record)", url)
-        return _check_terrain(np.where(np.isfinite(out), out, np.nan), grid_full)
+        log.warning("terrain: using RRFS 3 km model orography from %s (smoother than RTMA; RTMA terrain was unusable)", url)
+        return _check_terrain(np.where(np.isfinite(out), out, np.nan), grid_full, min_finite=0.80)
     raise nh.FetchError("RRFS terrain unavailable:\n  " + "\n  ".join(errors[:6]))
 
 
@@ -155,7 +189,7 @@ def terrain_auto(grid_full: GridSpec) -> np.ndarray:
     try:
         return terrain_from_rtma(grid_full)
     except nh.FetchError as e1:
-        log.warning("RTMA terrain unavailable, falling back to RRFS orography:\n%s", e1)
+        log.warning("RTMA terrain unusable, falling back to RRFS orography:\n%s", e1)
         try:
             return terrain_from_rrfs(grid_full)
         except nh.FetchError as e2:

@@ -13,6 +13,8 @@ section { margin-bottom: 14px; }
 h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 6px 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chips button { border: 1px solid var(--line); background: #f5f7f9; border-radius: 14px; padding: 5px 10px; cursor: pointer; font: inherit; color: var(--ink); }
+.chips button.dim { opacity: .45; }
+h2.sub { margin-top: 10px; }
 .chips button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 label { display: block; margin: 8px 0; }
 select { font: inherit; padding: 3px 6px; }

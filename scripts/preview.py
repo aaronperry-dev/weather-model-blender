@@ -11,7 +11,7 @@ from pwpf_blender import binormal
 from pwpf_blender.grid import GridSpec
 
 npz, out = sys.argv[1], sys.argv[2]
-win = sys.argv[3] if len(sys.argv) > 3 else "d1"
+win = sys.argv[3] if len(sys.argv) > 3 else "s24_f024"
 z = np.load(npz)
 meta = json.loads(str(z["meta"]))
 g = GridSpec.ndfd_2p5km(meta["stride"])

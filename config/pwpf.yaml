@@ -10,24 +10,31 @@
 grid:
   stride: 1                  # 1 = full 2.5 km NDFD grid, 2 = 5 km, 4 = 10 km (fast previews)
 
-cycle_hours: [0, 12]         # nominal cycles; first window starts at the first 12Z at/after the cycle
-bin_hours: 6                 # QPF/SLR/ptype are evaluated in 6-h bins, then summed to 24 h (12Z-12Z)
+cycle_hours: [0, 12]         # nominal cycles; every period is measured from the cycle time
+bin_hours: 6                 # QPF/SLR/ptype are evaluated in 6-h bins, then summed into the periods below
 workers: 4                   # concurrent member loads/processing
 min_members: 8               # abort if fewer members survive
 
+# PWPF periods (About PWPF Products): 24 h totals every 6 h out to 72 h, 48 h totals made of two adjacent
+# 24 h periods, and one 72 h total.  Ids: s24_f030 = 24 h ending 30 h after the cycle.  24-h-multiples only.
 windows:
-  - {id: d1,  label: "Day 1 (24 h)",          days: [0]}
-  - {id: d2,  label: "Day 2 (24 h)",          days: [1]}
-  - {id: d3,  label: "Day 3 (24 h)",          days: [2]}
-  - {id: d12, label: "Days 1-2 (48 h)",       days: [0, 1]}
-  - {id: d23, label: "Days 2-3 (48 h)",       days: [1, 2]}
+  step_h: 6
+  max_h: 72
+  lengths_h: [24, 48, 72]
 
 thresholds_in: [0.1, 1, 2, 4, 6, 8, 12, 18, 24, 36]
+thresholds_ice_in: [0.01, 0.05, 0.1, 0.25, 0.5]
 percentiles: [5, 10, 25, 50, 75, 90, 95]
 
 # ---- science settings -------------------------------------------------------------------------
 snow_level:
   wetbulb_c: 0.5             # PWPF: 0.5 degC wet-bulb surface
+
+ice:                         # freezing rain: simplified FRAM (Sanders & Barjenbruch 2016), precip-rate term only
+  enabled: true
+  report: flat               # flat (elevated horizontal ice) | radial (= 0.394 x flat)
+  radial_factor: 0.394
+  min_total_in: 0.005        # a period gets an ice layer only if some member reaches this much ice
 
 ptype:
   snow_sfc_max_c: 1.5        # decision tree (non-NCEP models): assumed thresholds

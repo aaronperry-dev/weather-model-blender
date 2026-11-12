@@ -20,9 +20,20 @@
 
   <aside id="panel">
     <section>
+      <h2>Hazard</h2>
+      <div class="chips" id="hazards">
+        <button data-prod="snow" class="on">Snowfall</button>
+        <button data-prod="ice">Freezing rain (ice)</button>
+      </div>
+    </section>
+
+    <section>
       <h2>Period</h2>
-      <div id="windows" class="chips"></div>
+      <div id="lengths" class="chips"></div>
+      <h2 class="sub">Ending</h2>
+      <div id="ends" class="chips"></div>
       <div id="validity" class="muted"></div>
+      <div id="nodata" class="muted" hidden>No freezing rain in any ensemble member for this period.</div>
     </section>
 
     <section>
@@ -32,7 +43,7 @@
         <button data-kind="pct">Percentile</button>
         <button data-kind="mode">Forecast (mode)</button>
       </div>
-      <label id="thrRow">Snowfall at least
+      <label id="thrRow"><span id="thrLabel">Snowfall at least</span>
         <select id="thr"></select> inches</label>
       <label id="pctRow" hidden>Percentile
         <select id="pct"></select></label>

@@ -213,7 +213,7 @@ class NoaaSource(Source):
             frac = {k: g(v, "surface") for k, v in m.items() if g(v, "surface") is not None} or None
         return StepFields(valid=valid, qpf_mm=self._qpf_step(init, fxx, member), t2m_c=t2 - 273.15,
                           rh2m=g("RH", "2 m above ground"), psfc_hpa=ps / 100.0, levels=levels,
-                          z_sfc_m=g("HGT", "surface"), native_type_frac=frac)
+                          z_sfc_m=g("HGT", "surface"), native_type_frac=frac, dt_h=float(self.step_hours))
 
     # ------------------------------------------------------------------ Source API
     def grid(self) -> SourceGrid:
@@ -346,5 +346,6 @@ class IfsSource(Source):
             if not levels:
                 raise nh.FetchError(f"{self.name}: no pressure-level fields at step {s1} h")
             out.append(StepFields(valid=init + timedelta(hours=s1), qpf_mm=np.clip(tp, 0, None).astype(np.float32),
-                                  t2m_c=t2 - 273.15, psfc_hpa=sp / 100.0, levels=levels, rh2m=None))
+                                  t2m_c=t2 - 273.15, psfc_hpa=sp / 100.0, levels=levels, rh2m=None,
+                                  dt_h=float(s1 - s0)))
         return out
