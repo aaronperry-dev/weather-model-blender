@@ -20,11 +20,13 @@ from .sources import noaa_sources as ns
 # (name, factory, plan fn, member, run hours, forecast hour to probe)
 MODELS = [
     ("gefs", ns.gefs, ns.plan_gefs, 1, (0, 6, 12, 18), 6),
+    ("cmce", ns.cmce, ns.plan_cmce, 1, (0, 12), 6),
     ("gfs", ns.gfs, ns.plan_gfs, None, (0, 6, 12, 18), 6),
     ("hrrr", ns.hrrr, ns.plan_hrrr, None, tuple(range(24)), 6),
     ("rrfs", ns.rrfs, ns.plan_rrfs, None, (0, 6, 12, 18), 6),
     ("rrfs_ens", ns.rrfs_ens, ns.plan_rrfs_ens, 1, (0, 6, 12, 18), 6),
 ]
+MSC_MODELS = [("rdps", (0, 6, 12, 18)), ("gdps", (0, 12))]           # MSC Datamart deterministic models (no .idx files)
 REQUIRED = [r"^TMP:2 m above ground", r"^PRES:surface", r"^APCP:surface:\d+-\d+ hour acc", r"^TMP:850 mb",
             r"^RH:850 mb", r"^HGT:850 mb"]
 OPTIONAL = [r"^CSNOW:surface", r"^RH:2 m above ground", r"^HGT:surface"]
@@ -95,6 +97,35 @@ def download_probe(name, factory, init: datetime, member) -> bool:
         return False
 
 
+def check_msc(key: str, run_hours, now, download: bool) -> bool:
+    """MSC Datamart has no inventories: probe a ranged GET of the 2 m temperature file, then (optionally) read a step."""
+    from .sources import make_source
+    src = make_source(key)
+    for back in range(0, 31):
+        init = (now - timedelta(hours=back)).replace(minute=0, second=0, microsecond=0)
+        if init.hour in run_hours and src.available(init, 6, None):
+            break
+    else:
+        print(f"[FAIL] {key}: no cycle with a published f006 file in the lookback window "
+              f"(e.g. {src.url(now.replace(minute=0, second=0, microsecond=0), 6, 'AirTemp', 'AGL-2m')})")
+        return False
+    print(f"[ .. ] {key}: newest cycle {init:%Y-%m-%d %HZ}\n        {src.url(init, 6, 'AirTemp', 'AGL-2m')}")
+    if not download:
+        print(f"[ ok ] {key}")
+        return True
+    try:
+        st = src.load_steps(init, init + timedelta(hours=3), init + timedelta(hours=6), None)[0]
+        g = src.grid()
+        zr = {p: (round(float(np.nanmin(v['z']))), round(float(np.nanmax(v['z'])))) for p, v in sorted(st.levels.items())}
+        print(f"[ ok ] {key} read f006 {init:%d %HZ}: grid {g.shape}, qpf mm [{np.nanmin(st.qpf_mm):.2f}, {np.nanmax(st.qpf_mm):.2f}], "
+              f"t2m C [{np.nanmin(st.t2m_c):.1f}, {np.nanmax(st.t2m_c):.1f}], psfc hPa [{np.nanmin(st.psfc_hpa):.0f}, "
+              f"{np.nanmax(st.psfc_hpa):.0f}], rh2m {st.rh2m is not None}\n        height range per level (m): {zr}")
+        return True
+    except Exception as e:                                       # noqa: BLE001
+        print(f"[FAIL] {key} download probe: {type(e).__name__}: {e}")
+        return False
+
+
 def run(download: bool = False, only: list[str] | None = None) -> int:
     logging.getLogger("urllib3").setLevel(logging.ERROR)
     nh.RETRIES, nh.TIMEOUT = 1, (8, 60)                          # a diagnostic should fail fast
@@ -109,6 +140,10 @@ def run(download: bool = False, only: list[str] | None = None) -> int:
             init, _ = _latest_init(plan_fn, member, run_hours, fxx, now)
             good = download_probe(name, factory, init, member)
         bad += not good
+    for key, run_hours in MSC_MODELS:
+        if only and key not in only:
+            continue
+        bad += not check_msc(key, run_hours, now, download)
     if not only or "terrain" in only:
         from .grid import GridSpec
         from .static_data import terrain_auto

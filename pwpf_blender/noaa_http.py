@@ -20,6 +20,7 @@ import os
 import random
 import re
 import tempfile
+from urllib.parse import urlencode
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -196,6 +197,8 @@ def policy_for(url: str) -> Policy:
         key, mk = "ncep", lambda: Policy("ncep", 1.0, 3, 2, (429, 503, 403))
     elif host in _PRISM_HOSTS:
         key, mk = "prism", lambda: Policy("prism", 0.5, 1, 1)
+    elif host == "dd.weather.gc.ca":                  # MSC Datamart (no published rate limit): stay modest
+        key, mk = "msc", lambda: Policy("msc", 2.0, 4, 2)
     elif host.startswith("ecmwf-forecasts.s3"):       # ECMWF open-data mirror: answered 503 under 4 parallel pulls
         key, mk = host, lambda: Policy(host, 3.0, 6, 2)
     elif host.startswith("noaa-") and host.endswith(".amazonaws.com"):     # NOAA open-data buckets
@@ -523,6 +526,42 @@ def fetch_fields(urls, patterns, want_grid: bool = False, post=None, merge_gap: 
     if cls is NoMatch:
         raise NoMatch(msg)
     raise FetchError(msg)
+
+
+def _lev_slug(level: str) -> str:
+    """idx level text -> grib-filter parameter suffix: '2 m above ground' -> '2_m_above_ground'."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", level).strip("_")
+
+
+def fetch_fields_filtered(idx_url: str, spec, patterns, want_grid: bool = False, post=None):
+    """Fetch the records matching `patterns` through an NCEP NOMADS *grib filter* CGI (server-side subsetting: one
+    request returns just the chosen variables x levels) instead of one byte-range request per record block.
+
+    `spec` = (cgi_url, dir, file).  The file's .idx tells which messages the filter returns (every record whose
+    variable AND level are selected, in file order), so the response decodes through the same path as range
+    downloads.  Returns (fields, grid, url).  FetchError if the CGI returns anything but GRIB or the message count
+    differs from the inventory's prediction."""
+    cgi, dirpath, fname = spec
+    records = get_inventory(idx_url)
+    selected = select_records(records, patterns)
+    if not selected:
+        raise NoMatch(f"{idx_url}: inventory has {len(records)} records but none match {list(patterns)}", records)
+    vars_ = sorted({r.var for r in selected})
+    levs = sorted({r.level for r in selected})
+    covered = sorted((r for r in records if r.var in vars_ and r.level in levs), key=lambda r: r.start)
+    q = {"dir": dirpath, "file": fname}
+    q.update({f"var_{v}": "on" for v in vars_})
+    q.update({f"lev_{_lev_slug(lv)}": "on" for lv in levs})
+    url = cgi + "?" + urlencode(q)
+    with tempfile.TemporaryDirectory(prefix="pwpf_dl_") as td:
+        dest = Path(td) / "sel.grib2"
+        download_file(url, dest)
+        with open(dest, "rb") as f:
+            head = f.read(200)
+        if head[:4] != b"GRIB":
+            raise FetchError(f"{url}: grib filter did not return GRIB: {head[:160]!r}")
+        fields, grid = decode_records(dest, covered, set(selected), want_grid, post)
+    return fields, grid, url
 
 
 # ------------------------------------------------------------------------------------------ helpers
