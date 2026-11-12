@@ -171,6 +171,19 @@ def test_synthetic_run_structure_and_physics(synthetic_run):
     assert W["s24_f030"]["start"] == res.cycle + timedelta(hours=6)
 
 
+def test_manifest_reports_prism_downscaling(synthetic_run, tmp_path):
+    cfg, res, out = synthetic_run
+    assert json.loads((out / "manifest.json").read_text())["prism_downscale"] is True
+    # no PRISM file (e.g. the download failed in CI): pipeline still runs, and says so
+    small = load_config(CFG, "synthetic", {"grid": {"stride": 16}, "workers": 2, "windows": {"lengths_h": [24], "max_h": 24}})
+    grid = GridSpec.ndfd_2p5km(16)
+    lon, lat = grid.lonlat()
+    res2 = Pipeline(small, grid, synthetic_terrain(lon, lat), None).run(datetime(2026, 1, 15, 12))
+    assert res2.meta["prism_downscale"] is False and list(res2.windows) == ["s24_f024"]
+    export.write_site(res2, small, tmp_path / "d")
+    assert json.loads((tmp_path / "d" / "manifest.json").read_text())["prism_downscale"] is False
+
+
 def test_png_roundtrip_matches_fields(synthetic_run):
     cfg, res, out = synthetic_run
     man = json.loads((out / "manifest.json").read_text())
