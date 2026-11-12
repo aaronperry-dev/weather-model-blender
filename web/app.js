@@ -501,6 +501,7 @@
     $('about').innerHTML = '<b>Notice.</b> ' + m.notice + ' Methodology: multi-model ensemble → QPF (PRISM-downscaled) × precipitation type × SLR → binormal fit (mode = ' +
       m.mode_method + ' forecast, variance from the ensemble). Freezing rain: simplified FRAM ice-to-liquid ratio.' +
       (m.terrain && m.terrain.enabled ? ' <b>Terrain adjustment</b> (browser-side, optional): snowfall is rescaled at each map pixel for the ground elevation from AWS Terrain Tiles relative to the 2.5 km model terrain — an elevation gradient (+' + Math.round(100 * m.terrain.precip_gradient_per_km) + "%/km, limited) and the rain/snow line at the model snow level; never more than all the liquid falling as snow. These are our assumptions, not part of WPC\'s method." : '') +
+      (m.accumulation ? ' <b>Accumulation</b> (our assumption, not part of WPC\'s method): snow in marginal air (ground wet-bulb above about -1 °C) is reduced, and warm early-season ground melts the first ~' + (m.accumulation.ground_melt_in_per_c).toFixed(2) + ' in per °C of soil temperature of snow.' : '') +
       (m.prism_downscale === false ? ' <b>PRISM QPF downscaling was not applied in this build.</b>' : '') + ' Model data: NOAA/NCEP, ECMWF open data (CC-BY-4.0).';
     map = L.map('map', { zoomSnap: 0.25, minZoom: 3, maxZoom: 12 }).fitBounds(m.bounds);
     setupBasemap();
