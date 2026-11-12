@@ -132,7 +132,7 @@ def plan_ranges(records: list[Record], selected: list[Record], merge_gap: int = 
 #   * NCEP (nomads / ftp / ftpprd): policy is 120 hits/minute per IP summed over those hosts, HEAD counted like GET
 #     (NWS SCN 21-32).  We stay at <= 60/minute in total and 2 connections.
 #   * AWS S3 open-data buckets: no published limit, but S3 answers 503 "SlowDown" when a prefix gets too many
-#     requests; we cap at 10 requests/s per bucket and back off on 503.
+#     requests; we cap at 20 requests/s (NOAA buckets; 10 for others) and back off on 503.
 #   * PRISM: one file at a time, one request every 2 s (its web service refuses a file fetched twice in 24 h).
 #   * ECMWF open data: far below its 500-simultaneous-connection limit.
 # On 429/503 (and 403 from NCEP, whose firewall blocks over-limit IPs) we honour Retry-After or back off
@@ -196,6 +196,10 @@ def policy_for(url: str) -> Policy:
         key, mk = "ncep", lambda: Policy("ncep", 1.0, 3, 2, (429, 503, 403))
     elif host in _PRISM_HOSTS:
         key, mk = "prism", lambda: Policy("prism", 0.5, 1, 1)
+    elif host.startswith("ecmwf-forecasts.s3"):       # ECMWF open-data mirror: answered 503 under 4 parallel pulls
+        key, mk = host, lambda: Policy(host, 3.0, 6, 2)
+    elif host.startswith("noaa-") and host.endswith(".amazonaws.com"):     # NOAA open-data buckets
+        key, mk = host, lambda: Policy(host, 20.0, 40, 6)
     elif host.endswith(".amazonaws.com"):
         key, mk = host, lambda: Policy(host, 10.0, 20, 4)
     elif host.endswith("ecmwf.int"):
@@ -522,7 +526,8 @@ def fetch_fields(urls, patterns, want_grid: bool = False, post=None, merge_gap: 
 
 
 # ------------------------------------------------------------------------------------------ helpers
-ACC_RE = re.compile(r"(\d+)-(\d+) hour acc")
+# wgrib2 writes accumulations of whole days as "0-1 day acc fcst" (HRRR/RRFS at f24, f48, ...), not "0-24 hour acc"
+ACC_RE = re.compile(r"(\d+)-(\d+) (hour|day) acc")
 
 
 def find(fields: dict, var: str, level: str, fcst_re: str | None = None):
@@ -539,5 +544,6 @@ def acc_intervals(fields: dict) -> dict:
     for (v, lv, fc), arr in fields.items():
         m = ACC_RE.search(fc)
         if v == "APCP" and m:
-            out[(int(m.group(1)), int(m.group(2)))] = arr
+            k = 24 if m.group(3) == "day" else 1
+            out[(int(m.group(1)) * k, int(m.group(2)) * k)] = arr
     return out

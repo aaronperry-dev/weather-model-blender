@@ -32,6 +32,7 @@ class MemberRun:
     weight: float
     max_fxx_h: float
     fallback: "MemberRun | None" = None
+    note: str = ""                       # e.g. "00Z run not complete yet; used 18Z"
 
 
 def select_init(cycle: datetime, run_hours, age_h: float, lag_h: float = 0) -> datetime:
@@ -71,7 +72,48 @@ def window_specs(cfg: dict, cycle: datetime) -> list[WindowSpec]:
     return out
 
 
-def expand_members(cfg: dict, cycle: datetime, sources: dict | None = None) -> list[MemberRun]:
+def _run_spacing(run_hours) -> int:
+    hs = sorted(set(int(h) for h in run_hours))
+    gaps = [(hs[(i + 1) % len(hs)] - h) % 24 or 24 for i, h in enumerate(hs)]
+    return min(gaps)
+
+
+def resolve_inits(g: dict, src, first_member, cycle: datetime, need_h: float | None) -> list[tuple[datetime, str]]:
+    """Model initialisations for group `g`: the nominal run (see select_init) for each lag, but if that run has not
+    finished publishing the lead times this blend needs (e.g. GFS 00Z at 03:40Z: f036 and later are not out yet),
+    step back one run at a time (max 2) instead of losing the model.  Returns [(init, note)]."""
+    probe = getattr(src, "available", None) if need_h else None
+    spacing = _run_spacing(g["run_hours"])
+    step = max(int(getattr(src, "step_hours", 1) or 1), 1)
+    out, used = [], set()
+    for lag in g.get("lags_h", [0]):
+        nominal = select_init(cycle, g["run_hours"], g.get("age_h", 0), lag)
+        chosen, note = None, ""
+        for extra in range(0, 3):
+            init = select_init(cycle, g["run_hours"], g.get("age_h", 0), lag + extra * spacing)
+            if init in used:
+                continue
+            ok = True
+            if probe is not None:
+                last = min(float(g["max_fxx_h"]), (cycle + timedelta(hours=need_h) - init).total_seconds() / 3600.0)
+                fxx = int(-(-last // step) * step)
+                if fxx > 0:
+                    ok = bool(probe(init, fxx, first_member))
+            if ok:
+                chosen = init
+                if init != nominal:
+                    note = f"{nominal:%d %HZ} run not fully published yet; using {init:%d %HZ}"
+                break
+        if chosen is None:                               # nothing complete: keep the nominal run, failures get reported
+            chosen = nominal if nominal not in used else None
+        if chosen is None:
+            continue
+        used.add(chosen)
+        out.append((chosen, note))
+    return out
+
+
+def expand_members(cfg: dict, cycle: datetime, sources: dict | None = None, need_h: float | None = None) -> list[MemberRun]:
     sources = {} if sources is None else sources
     groups: dict[str, list[MemberRun]] = {}
     for g in cfg["members"]:
@@ -91,11 +133,12 @@ def expand_members(cfg: dict, cycle: datetime, sources: dict | None = None) -> l
             else:
                 ids = pool[:n]
         runs = []
-        for lag in g.get("lags_h", [0]):
-            init = select_init(cycle, g["run_hours"], g.get("age_h", 0), lag)
+        for init, note in resolve_inits(g, src, ids[0], cycle, need_h):
+            if note:
+                log.warning("%s: %s", g["name"], note)
             for m in ids:
                 runs.append(MemberRun(g["name"], f"{g['name']}:{m}@{init:%d%HZ}", src, m, init,
-                                      src.native_ptype, float(g.get("weight", 1.0)), float(g["max_fxx_h"])))
+                                      src.native_ptype, float(g.get("weight", 1.0)), float(g["max_fxx_h"]), note=note))
         groups[g["name"]] = runs
     for g in cfg["members"]:
         fb = g.get("fallback")
@@ -149,12 +192,12 @@ class Pipeline:
     # ------------------------------------------------------------------ whole run
     def run(self, cycle: datetime) -> Results:
         cfg = self.cfg
-        runs = expand_members(cfg, cycle)
-        n = len(runs)
-        log.info("cycle %s: %d members", cycle, n)
         specs = window_specs(cfg, cycle)
         bin_h = int(cfg.get("bin_hours", 6))
         nbins = max(s.end_h for s in specs) // bin_h
+        runs = expand_members(cfg, cycle, need_h=nbins * bin_h)
+        n = len(runs)
+        log.info("cycle %s: %d members", cycle, n)
         for src in {id(r.source): r.source for r in runs}.values():
             if hasattr(src, "set_span"):                  # let sources fetch each member once for the whole run
                 src.set_span(cycle, cycle + timedelta(hours=nbins * bin_h))
@@ -188,7 +231,7 @@ class Pipeline:
 
         res = Results(cycle=cycle, grid=self.grid)
         res.members = [{"label": r.label, "group": r.group, "member": "" if r.member is None else str(r.member),
-                        "init": r.init.isoformat(), "weight": r.weight, "max_fxx_h": r.max_fxx_h,
+                        "init": r.init.isoformat(), "weight": r.weight, "max_fxx_h": r.max_fxx_h, "note": r.note,
                         "fallback": r.fallback.group if r.fallback else None,
                         "ok": bool(avail[i].all()), "bins_ok": int(avail[i].sum()), "bins_total": nbins,
                         "bins": "".join("1" if v else "0" for v in avail[i]),
