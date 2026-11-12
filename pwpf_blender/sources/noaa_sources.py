@@ -274,6 +274,13 @@ class IfsSource(Source):
         self._crop = _Cropper()
         self._grid = None
         self._lock = threading.Lock()
+        self._span: tuple[datetime, datetime] | None = None
+        self._dl_locks: dict[str, threading.Lock] = {}
+
+    def set_span(self, start: datetime, end: datetime) -> None:
+        """Valid-time span the whole run will need.  With it each member's file is fetched once for the span
+        instead of once per 6-h bin (which re-downloaded the boundary steps and ~2.7x the bytes)."""
+        self._span = (start, end)
 
     def grid(self) -> SourceGrid:
         if self._grid is None:
@@ -281,12 +288,21 @@ class IfsSource(Source):
         return self._grid
 
     def _retrieve(self, init, steps, member, levtype) -> Path:
-        try:
-            from ecmwf.opendata import Client
-        except ImportError as e:                                     # pragma: no cover
-            raise nh.FetchError("ecmwf-opendata is required for IFS (pip install -r requirements-live.txt)") from e
         target = self.save_dir / f"{self.name}_{init:%Y%m%d%H}_{member}_{levtype}_{steps[0]}-{steps[-1]}.grib2"
+        with self._lock:
+            dl_lock = self._dl_locks.setdefault(target.name, threading.Lock())
+        with dl_lock:                      # two bins asking for the same member's file must not both download it
+            self._download(target, init, steps, member, levtype)
+        return target
+
+    def _download(self, target: Path, init, steps, member, levtype) -> None:
         if not target.exists():
+            os.environ.setdefault("TQDM_DISABLE", "1")       # multiurl's per-file bars flood the CI log
+            try:
+                from ecmwf.opendata import Client
+            except ImportError as e:                                     # pragma: no cover
+                raise nh.FetchError("ecmwf-opendata is required for IFS (pip install -r requirements-live.txt)") from e
+
             req = dict(date=init.strftime("%Y%m%d"), time=init.hour, step=steps, target=str(target))
             if self.ensemble:
                 req.update(stream="enfo", type="pf", number=[int(member)])
@@ -307,9 +323,8 @@ class IfsSource(Source):
             except Exception as e:                                   # noqa: BLE001
                 raise nh.FetchError(f"ECMWF open data ({self.source}) request failed: {type(e).__name__}: {e}; "
                                     f"request={ {k: v for k, v in req.items() if k != 'target'} }") from e
-        return target
 
-    def _decode(self, path: Path) -> dict:
+    def _decode(self, path: Path, steps=None) -> dict:
         """{(shortName, typeOfLevel, level, step_h): cropped float32 array}"""
         ec = nh._ec()
         out = {}
@@ -319,6 +334,8 @@ class IfsSource(Source):
                 if gid is None:
                     break
                 try:
+                    if steps is not None and int(ec.codes_get(gid, "endStep")) not in steps:
+                        continue                                      # `finally` still releases gid
                     if self._grid is None:
                         with self._lock:
                             if self._grid is None:
@@ -336,8 +353,16 @@ class IfsSource(Source):
         f0 = int((valid_start - init).total_seconds() / 3600)
         f1 = int((valid_end - init).total_seconds() / 3600)
         steps = list(range(f0, f1 + 1, self.step_hours))
-        sfc = self._decode(self._retrieve(init, steps, member, "sfc"))
-        pl = self._decode(self._retrieve(init, steps, member, "pl"))
+        fetch = steps
+        if self._span is not None:
+            h = self.step_hours
+            lo = max(0, int((self._span[0] - init).total_seconds() // 3600) // h * h)
+            hi = -(-int((self._span[1] - init).total_seconds() // 3600) // h) * h
+            if lo <= f0 and hi >= f1:
+                fetch = list(range(lo, hi + 1, h))
+        want = set(steps)
+        sfc = self._decode(self._retrieve(init, fetch, member, "sfc"), want)
+        pl = self._decode(self._retrieve(init, fetch, member, "pl"), want)
         get = lambda d, name, tol, lev, s: d.get((name, tol, lev, s))      # noqa: E731
         out = []
         for k in range(1, len(steps)):
