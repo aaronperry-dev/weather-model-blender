@@ -313,6 +313,7 @@ class IfsSource(Source):
     step_hours = 6
     src_dx_km = 28.0
     native_ptype = False
+    MIRRORS = ("aws", "google", "azure", "ecmwf")          # tried in this order after the configured primary
 
     def __init__(self, name: str, ensemble: bool, source: str | None = None, save_dir=None):
         self.name, self.ensemble = name, ensemble
@@ -359,17 +360,32 @@ class IfsSource(Source):
                 req.update(param=["tp", "2t", "sp"])
             else:
                 req.update(levtype="pl", levelist=list(LEVELS), param=["t", "gh", "r"])
-            try:
-                # ecmwf-opendata defaults to 500 retries x 120 s; keep it to a few, and count its requests
-                # (1 index + about one ranged GET per step) against the host's rate limit
-                host = {"aws": "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/",
-                        "azure": "https://ecmwf.blob.core.windows.net/",
-                        "google": "https://storage.googleapis.com/"}.get(self.source, "https://data.ecmwf.int/")
-                with nh.polite(host, cost=1 + len(steps)):
-                    Client(source=self.source, maximum_retries=5, retry_after=20).retrieve(**req)
-            except Exception as e:                                   # noqa: BLE001
-                raise nh.FetchError(f"ECMWF open data ({self.source}) request failed: {type(e).__name__}: {e}; "
-                                    f"request={ {k: v for k, v in req.items() if k != 'target'} }") from e
+            hosts = {"aws": "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/",
+                     "azure": "https://ecmwf.blob.core.windows.net/",
+                     "google": "https://storage.googleapis.com/", "ecmwf": "https://data.ecmwf.int/"}
+            chain = [self.source] + [m for m in self.MIRRORS if m != self.source]
+            errors = []
+            for mirror in chain:
+                try:
+                    # The client's downloader makes one ranged GET per GRIB message (S3 cannot serve several ranges at
+                    # once), i.e. far more requests than files; mount_polite paces and counts every one of them.
+                    # Library default is 500 retries x 120 s: keep it short and move on to the next mirror instead.
+                    with nh.polite(hosts.get(mirror, hosts["ecmwf"]), cost=0):
+                        client = Client(source=mirror, maximum_retries=4, retry_after=[10, 40, 2])
+                        nh.mount_polite(client.session)
+                        client.retrieve(**req)
+                    if errors:
+                        log.warning("%s: %s mirror served the file after %s", self.name, mirror, "; ".join(errors))
+                    return
+                except Exception as e:                                   # noqa: BLE001
+                    errors.append(f"{mirror}: {type(e).__name__}: {str(e)[:160]}")
+                    for junk in (target, Path(str(target) + ".part")):
+                        if junk.exists():
+                            junk.unlink()                                  # never keep a truncated download
+                    if "404" in str(e):                                    # not published yet: other mirrors won't have it
+                        break
+            raise nh.FetchError(f"ECMWF open data request failed on every mirror ({' | '.join(errors)}); "
+                                f"request={ {k: v for k, v in req.items() if k != 'target'} }")
 
     def _decode(self, path: Path, steps=None) -> dict:
         """{(shortName, typeOfLevel, level, step_h): cropped float32 array}"""
