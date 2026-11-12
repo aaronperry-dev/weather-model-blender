@@ -58,6 +58,10 @@ def _write_bil_zip(path, arr):
 
 # ------------------------------------------------------------------ names
 @pytest.mark.parametrize("name,month", [
+    ("prism_ppt_us_30s_202001_avg_30y.zip", 1),               # real 800 m names (as listed by PRISM)
+    ("prism_ppt_us_30s_202012_avg_30y.zip", 12),
+    ("prism_ppt_us_25m_202007_avg_30y.zip", 7),
+    ("prism_ppt_us_30s_2020_avg_30y.zip", None),             # the annual file
     ("PRISM_ppt_30yr_normal_4kmM4_01_bil.zip", 1),
     ("PRISM_ppt_30yr_normal_4kmM4_12_bil.zip", 12),
     ("prism_ppt_us_25m_202003.tif", 3),
@@ -78,8 +82,12 @@ def test_pick_monthly_prefers_geotiff_and_ignores_extras():
     names = [f"PRISM_ppt_30yr_normal_4kmM4_{m:02d}_bil.zip" for m in range(1, 13)]
     names += ["PRISM_ppt_30yr_normal_4kmM4_annual_bil.zip", "PRISM_ppt_30yr_normal_4kmM4_all_bil.zip", "x.xml"]
     names += ["prism_ppt_us_25m_202005.tif"]
+    names += [f"prism_ppt_us_30s_2020{m:02d}_avg_30y.zip" for m in range(1, 13)] + ["prism_ppt_us_30s_2020_avg_30y.zip"]
     got = sd.pick_monthly(names)
     assert sorted(got) == list(range(1, 13)) and got[5].endswith(".tif") and got[4].endswith("_04_bil.zip")
+    real = [f"prism_ppt_us_30s_2020{m:02d}_avg_30y.zip" for m in range(1, 13)] + ["prism_ppt_us_30s_2020_avg_30y.zip"]
+    got = sd.pick_monthly(real)
+    assert got == {m: f"prism_ppt_us_30s_2020{m:02d}_avg_30y.zip" for m in range(1, 13)}
 
 
 # ------------------------------------------------------------------ readers
@@ -218,3 +226,41 @@ def test_prepare_static_from_local_folder(tmp_path, monkeypatch):
     (folder / "prism_ppt_us_25m_202012.tif").unlink()
     t2, p2 = sd.prepare_static(tmp_path / "out3", str(tmp_path / "terr.npy"), str(folder))
     assert p2 is None
+
+
+def test_default_url_is_the_monthly_directory():
+    assert sd.PRISM_URL.endswith("/normals/us/800m/ppt/monthly/")
+
+
+def test_geotiff_tifffile_fallback(tmp_path, monkeypatch):
+    pytest.importorskip("tifffile")
+    _write_tif(tmp_path / "f.tif", _field(2))
+    monkeypatch.setattr(sd, "_read_tiff_pillow", lambda src: (_ for _ in ()).throw(OSError("unsupported compression")))
+    arr, h = sd.read_geotiff(tmp_path / "f.tif")
+    assert arr.shape == (NROWS, NCOLS) and np.allclose(arr[50, 50], _field(2)[50, 50])
+    assert h["ulx"] == pytest.approx(ULX_C - D / 2) and h["dy"] == pytest.approx(D)
+
+
+def test_800m_raster_is_area_averaged_to_the_target_grid(tmp_path):
+    """A fine raster with cell-scale noise: the sampled field follows the smooth signal, not the noise."""
+    rng = np.random.default_rng(1)
+    d8 = 1 / 120                                              # 800 m cells
+    n_c, n_r = 600, 300
+    lon = -105 + np.arange(n_c) * d8
+    lat = 40 - np.arange(n_r) * d8
+    X, Y = np.meshgrid(lon, lat)
+    smooth = (100 + 30 * np.sin(np.radians(X * 40)) + 5 * Y).astype(np.float32)
+    noisy = smooth + rng.normal(0, 15, smooth.shape).astype(np.float32)
+    im = Image.fromarray(noisy, mode="F")
+    ifd = TiffImagePlugin.ImageFileDirectory_v2()
+    ifd[33550] = (d8, d8, 0.0); ifd.tagtype[33550] = 12
+    ifd[33922] = (0.0, 0.0, 0.0, -105 - d8 / 2, 40 + d8 / 2, 0.0); ifd.tagtype[33922] = 12
+    im.save(tmp_path / "fine.tif", tiffinfo=ifd, compression="tiff_adobe_deflate")
+    grid = GridSpec.ndfd_2p5km(1)
+    lo, la = grid.lonlat()
+    sel = (lo > -104.5) & (lo < -100.5) & (la > 37.6) & (la < 39.4)        # well inside the raster
+    out = sd.prism_to_grid([tmp_path / "fine.tif"] * 12, grid)[0]
+    exp = (100 + 30 * np.sin(np.radians(lo * 40)) + 5 * la)
+    err_avg = np.nanstd((out - exp)[sel])
+    raw = sd._block_average(noisy, 1)                                       # what plain point sampling would see
+    assert err_avg < 0.45 * np.std(raw - smooth)                            # averaging removed most of the noise
