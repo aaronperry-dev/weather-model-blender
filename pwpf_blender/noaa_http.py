@@ -348,7 +348,7 @@ def _request(url: str, headers=None, stream: bool = False, timeout=None):
     raise FetchError(f"{url}: gave up after {RETRIES + 1} attempts (last: {last})")
 
 
-THROTTLE_PENALTY_S = 15.0                # shared pause after one throttle answer to a client that makes its own requests
+THROTTLE_PENALTY_S = 8.0                # shared pause after one throttle answer to a client that makes its own requests
 
 
 def mount_polite(session) -> None:
