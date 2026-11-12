@@ -162,7 +162,11 @@ class NoaaSource(Source):
         acc = nh.acc_intervals(fields)
         with self._lock:
             self._acc[key] = acc
-            while len(self._acc) > 24:
+            # keep recent accumulations (shared by all members/threads) within ~400 MB so that the first step of
+            # the next bin finds its predecessor instead of downloading the same records again
+            per = max((a.nbytes for d in acc.values() for a in [d]), default=1) * max(len(acc), 1)
+            cap = max(24, int(400e6 // max(per, 1)))
+            while len(self._acc) > cap:
                 self._acc.pop(next(iter(self._acc)))
         return acc
 
@@ -293,7 +297,13 @@ class IfsSource(Source):
             else:
                 req.update(levtype="pl", levelist=list(LEVELS), param=["t", "gh", "r"])
             try:
-                Client(source=self.source).retrieve(**req)
+                # ecmwf-opendata defaults to 500 retries x 120 s; keep it to a few, and count its requests
+                # (1 index + about one ranged GET per step) against the host's rate limit
+                host = {"aws": "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/",
+                        "azure": "https://ecmwf.blob.core.windows.net/",
+                        "google": "https://storage.googleapis.com/"}.get(self.source, "https://data.ecmwf.int/")
+                with nh.polite(host, cost=1 + len(steps)):
+                    Client(source=self.source, maximum_retries=3, retry_after=60).retrieve(**req)
             except Exception as e:                                   # noqa: BLE001
                 raise nh.FetchError(f"ECMWF open data ({self.source}) request failed: {type(e).__name__}: {e}; "
                                     f"request={ {k: v for k, v in req.items() if k != 'target'} }") from e
