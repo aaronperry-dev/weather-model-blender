@@ -350,7 +350,7 @@ def test_ice_48h_mode_is_sum_of_24h_ice_modes(synthetic_run):
         assert np.allclose(I["s48_f048"]["mode"], I["s24_f024"]["mode"] + I["s24_f048"]["mode"], atol=1e-4)
 
 
-def test_calibration_report_runs_on_a_synthetic_cycle(caplog):
+def test_calibration_report_runs_on_a_synthetic_cycle(caplog, tmp_path):
     """The calibration block (box statistics by model group + NWS reference points) is produced and never breaks a run."""
     import logging
     from pwpf_blender import calibration
@@ -361,8 +361,13 @@ def test_calibration_report_runs_on_a_synthetic_cycle(caplog):
     grid = GridSpec.ndfd_2p5km(8)
     lon, lat = grid.lonlat()
     with caplog.at_level(logging.INFO):
-        Pipeline(cfg, grid, synthetic_terrain(lon, lat), synthetic_prism(lon, lat)).run(datetime(2026, 1, 15, 12))
+        res = Pipeline(cfg, grid, synthetic_terrain(lon, lat), synthetic_prism(lon, lat)).run(datetime(2026, 1, 15, 12))
     txt = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PRISM x" in txt and "own share" in txt
+    from pwpf_blender import export
+    import json as _json
+    man = _json.loads(export.write_site(res, cfg, tmp_path / "d").read_text())
+    assert man["calibration"] == "calibration.txt" and "BLEND (mode)" in (tmp_path / "d" / "calibration.txt").read_text()
     assert "calibration report" in txt and "[s72_f072]" in txt and "BLEND (mode)" in txt
     assert "Hunter NY" in txt and "mode / NWS" in txt
     assert "what makes the snow" in txt and "ALL MEMBERS" in txt            # QPF x snow share x SLR per group

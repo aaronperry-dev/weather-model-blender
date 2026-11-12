@@ -127,6 +127,7 @@ def test_defaults_title_and_layout(page):
     m, t = page.locator("#map").bounding_box(), page.locator("#membersTable").bounding_box()
     assert m["height"] >= 520 and t["y"] > m["y"] + m["height"] - 5                          # table below the (tall) map
     assert page.inner_text("#membersSummary").startswith("34 of 34 members")
+    assert page.is_visible("#calib summary") and "BLEND (mode)" in page.inner_text("#calibText") + page.evaluate("document.getElementById('calibText').textContent")
     assert not page.errors
 
 
