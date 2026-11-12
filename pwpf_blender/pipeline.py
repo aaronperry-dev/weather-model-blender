@@ -154,6 +154,9 @@ class Pipeline:
         specs = window_specs(cfg, cycle)
         bin_h = int(cfg.get("bin_hours", 6))
         nbins = max(s.end_h for s in specs) // bin_h
+        for src in {id(r.source): r.source for r in runs}.values():
+            if hasattr(src, "set_span"):                  # let sources fetch each member once for the whole run
+                src.set_span(cycle, cycle + timedelta(hours=nbins * bin_h))
         ok = np.ones(n, bool)
         ny, nx = self.grid.shape
         ice_on = cfg.get("ice", {}).get("enabled", True)
