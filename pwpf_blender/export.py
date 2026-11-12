@@ -264,6 +264,13 @@ def write_site(results, cfg: dict, outdir: str | Path) -> Path:
         "prism_downscale": bool(results.meta.get("prism_downscale", False)),
         "notice": "Unofficial guidance built from public WPC PWPF documentation. Not a National Weather Service product.",
     }
+    cal = out / "calibration.txt"
+    txt = getattr(results, "calibration", "")
+    if txt and (cfg.get("calibration") or {}).get("publish", True):
+        cal.write_text(txt.strip() + "\n")
+        manifest["calibration"] = "calibration.txt"
+    elif cal.exists():
+        cal.unlink()
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
     return out / "manifest.json"
 

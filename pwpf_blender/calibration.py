@@ -118,29 +118,36 @@ def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None =
 
 
 def _decomposition(ptdiag, runs, members, groups, idx_pts, k0, k1):
-    """snow = QPF x (share of the liquid that fell as snow) x SLR, per model group, averaged over the reference points
-    where NWS shows at least 0.5 in.  ptdiag[i, k] = (QPF in, potential snow in = QPF x SLR, snow in) at every point."""
+    """snow = QPF x snow share x SLR per model group, averaged over the reference points where NWS shows >= 0.5 in.
+    ptdiag[i, k] = (QPF before PRISM, QPF, potential snow, snow, potential snow with the model's own snow type only)."""
     sel = [q for q, (_, ref, _) in enumerate(idx_pts) if ref >= 0.5]
     if not sel:
         return []
-    out = ["   what makes the snow, per group, mean over the points with NWS >= 0.5 in  (snow = QPF x snow share x SLR):",
-           f"      {'group':<14}{'QPF in':>8}{'snow share':>12}{'SLR':>7}{'snow in':>9}{'NWS in':>8}"]
+    out = ["   what makes the snow, per group, mean over the points with NWS >= 0.5 in:  snow = QPF x snow share x SLR",
+           "      (QPF raw = model liquid before PRISM; PRISM x = downscaling factor; own share = liquid that the model's own",
+           "       precipitation type calls snow; share = after also counting terrain above the 0.5 C wet-bulb level as snow)",
+           f"      {'group':<14}{'QPF raw':>8}{'PRISM x':>8}{'QPF in':>8}{'own share':>10}{'share':>7}{'SLR':>6}{'snow in':>9}{'NWS in':>8}"]
     nws = float(np.mean([idx_pts[q][1] for q in sel]))
     allj = list(range(len(members)))
     for g, js in [("ALL MEMBERS", allj)] + sorted(groups.items()):
         ii = [members[j] for j in js]
-        d = ptdiag[ii][:, k0:k1].sum(axis=1)[:, :, sel]             # (members, 3, points): window sums
-        qpf, pot, snow = (float(d[:, c].mean()) for c in range(3))
-        if qpf <= 0:
+        d = ptdiag[ii][:, k0:k1].sum(axis=1)[:, :, sel]             # (members, 5, points): window sums
+        q0, q, pot, snow, nat = (float(d[:, c].mean()) for c in range(5))
+        if q <= 0:
             continue
-        out.append(f"      {g[:13]:<14}{qpf:>8.2f}{(snow / pot if pot > 0 else 0):>12.2f}{(pot / qpf if qpf > 0 else 0):>7.1f}{snow:>9.2f}{nws:>8.2f}")
+        out.append(f"      {g[:13]:<14}{q0:>8.2f}{(q / q0 if q0 > 0 else 0):>8.2f}{q:>8.2f}{(nat / pot if pot > 0 else 0):>10.2f}"
+                   f"{(snow / pot if pot > 0 else 0):>7.2f}{(pot / q):>6.1f}{snow:>9.2f}{nws:>8.2f}")
     return out
 
 
-def log_report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None = None, ptdiag=None) -> None:
+def log_report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None = None, ptdiag=None) -> str:
+    """Log the report and return its text ("" when disabled or on error)."""
     if (cfg or {}).get("enabled", True) is False:
-        return
+        return ""
     try:
-        log.info("%s", report(res, runs, avail, snow_bins, lon, lat, bin_h, cfg, ptdiag))
+        txt = report(res, runs, avail, snow_bins, lon, lat, bin_h, cfg, ptdiag)
+        log.info("%s", txt)
+        return txt
     except Exception as e:                                                   # noqa: BLE001
         log.warning("calibration report failed: %s", e)
+        return ""

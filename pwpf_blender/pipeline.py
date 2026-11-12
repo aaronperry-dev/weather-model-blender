@@ -161,6 +161,7 @@ class Results:
     skipped: list = field(default_factory=list)          # windows not produced: [{id, n_members, reason}]
     meta: dict = field(default_factory=dict)
     terrain: np.ndarray | None = None     # 2.5 km model terrain (m), exported for the browser's terrain adjustment
+    calibration: str = ""                 # end-of-run calibration report (also written to the site as calibration.txt)
 
 
 class AuxAccumulator:
@@ -254,7 +255,7 @@ class Pipeline:
         snow_bins: list[np.ndarray] = []                    # per 6-h bin: (n, ny, nx) float16 snowfall (in)
         from . import calibration as _cal
         self._pt_idx = _cal.point_indices(self._dst_lat, self._dst_lon, (cfg.get("calibration") or {}).get("points"))
-        self._ptdiag = np.zeros((n, nbins, 3, len(self._pt_idx)), np.float32)     # QPF in, potential snow in, snow in at the reference points
+        self._ptdiag = np.zeros((n, nbins, 5, len(self._pt_idx)), np.float32)     # at the reference points: QPF before PRISM, QPF, potential snow, snow, potential snow with the model's own snow type only (inches)
         ice_bins: list[dict] = []                           # per bin: {member index: (ny, nx) float16 ice (in)}
         for k in range(nbins):
             b0 = cycle + timedelta(hours=k * bin_h)
@@ -290,8 +291,8 @@ class Pipeline:
         if ice_on:
             self._fit_windows(res, specs, snow_bins, weights, avail, bin_h, ice=True, bins_ice=ice_bins)
         from . import calibration
-        calibration.log_report(res, runs, avail, snow_bins, self._dst_lon, self._dst_lat, bin_h, cfg.get("calibration"),
-                               self._ptdiag)
+        res.calibration = calibration.log_report(res, runs, avail, snow_bins, self._dst_lon, self._dst_lat, bin_h,
+                                                 cfg.get("calibration"), self._ptdiag)
         from . import noaa_http as _nh
         log.info("HTTP request budget:\n%s", _nh.STATS.report())
         n_full = int(avail.all(axis=1).sum())
@@ -418,7 +419,8 @@ class Pipeline:
                         aux_acc.add(k, float(runs[i].weight), aux)
                     if aux and "q" in aux and getattr(self, "_pt_idx", None):
                         for pi, (_, _, (pr, pc)) in enumerate(self._pt_idx):
-                            self._ptdiag[i, k, :, pi] = (aux["q"][pr, pc] / 25.4, aux["pot"][pr, pc], float(sn[pr, pc]))
+                            self._ptdiag[i, k, :, pi] = (aux["q0"][pr, pc] / 25.4, aux["q"][pr, pc] / 25.4, aux["pot"][pr, pc],
+                                                         float(sn[pr, pc]), aux["pot_nat"][pr, pc])
                     snow[i] = sn
                     avail[i, k] = True
                     fails[i] = 0

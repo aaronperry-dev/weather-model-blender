@@ -126,6 +126,7 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
     out = regrid(np.stack(layers))
     q2, ns2, sl2, slr2 = out[:4]
     q2 = np.nan_to_num(q2, nan=0.0)
+    q_raw = q2.copy() if aux is not None else None         # before the PRISM ratio (diagnostics)
     ns2 = np.nan_to_num(ns2, nan=0.0)
     sl2 = np.nan_to_num(sl2, nan=SNOW_LEVEL_WARM)
     slr2 = np.nan_to_num(slr2, nan=10.0)
@@ -144,6 +145,8 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
         aux["pot"] = (q2 / MM_PER_INCH * slr2).astype(np.float32)
         aux["sl"] = np.clip(sl2, SNOW_LEVEL_COLD, SNOW_LEVEL_WARM).astype(np.float32)
         aux["q"] = q2.astype(np.float32)
+        aux["q0"] = q_raw.astype(np.float32)
+        aux["pot_nat"] = (q2 / MM_PER_INCH * slr2 * (ns2 >= 0.5)).astype(np.float32)      # snow if only the model's own snow type counted
     if ice2 is not None:
         if ctx.ice_cfg.get("report", "flat") == "radial":
             ice2 = ice2 * float(ctx.ice_cfg.get("radial_factor", RADIAL_FACTOR))
