@@ -303,22 +303,54 @@ def test_prism_request_that_was_not_served_is_not_counted(tmp_path):
 
 
 # ------------------------------------------------------------------ ECMWF client
+ROOTS = {"aws": "https://aws.test", "google": "https://google.test", "azure": "https://azure.test", "ecmwf": "https://ecmwf.test"}
+FILE = "/20260115/00z/ifs/0p25/enfo/20260115000000-6h-enfo-ef.grib2"
+PARTS = ((0, 4), (4, 4), (1_000_000, 6))                # two adjacent messages and one far away
+
+
 class _FakeClient:
-    """Stands in for ecmwf.opendata.Client; behaviour per mirror is scripted through `plan`."""
+    """Stands in for ecmwf.opendata.Client: `_get_urls` (index lookup) fails per mirror as scripted."""
     plan: dict = {}
     seen: list = []
 
     def __init__(self, **kw):
         import requests
+        from types import SimpleNamespace
         type(self).seen.append(kw)
         self.kw, self.session = kw, requests.Session()
+        self.source = SimpleNamespace(url=ROOTS[kw["source"]] + "/")
 
-    def retrieve(self, **req):
+    def _get_urls(self, request=None, use_index=False, target=None, **kw):
+        from types import SimpleNamespace
         act = type(self).plan.get(self.kw["source"], "ok")
         if act != "ok":
-            Path(req["target"]).write_bytes(b"GR")                 # a truncated file must not survive the failure
             raise RuntimeError(act)
-        Path(req["target"]).write_bytes(b"GRIB")
+        return SimpleNamespace(urls=[(self.source.url.rstrip("/") + FILE, PARTS)], target=target)
+
+
+class _FakeHttp:
+    """Stands in for nh._request: serves byte ranges, failing the first `fail` requests of a mirror."""
+
+    def __init__(self, fail=None, status=206):
+        self.calls, self.fail, self.status = [], fail or {}, status
+
+    def __call__(self, url, headers=None, **k):
+        a, b = (int(x) for x in headers["Range"].split("=")[1].split("-"))
+        self.calls.append((url.split("//")[1].split(".")[0], a, b))
+        host = self.calls[-1][0]
+        if self.fail.get(host, 0) > 0:
+            self.fail[host] -= 1
+            raise nh.FetchError(f"{url}: gave up after 5 attempts (last: HTTP 503)")
+
+        status, body = self.status, bytes((a + i) % 251 for i in range(b - a + 1))
+
+        class R:
+            status_code = status
+            content = body
+
+            def close(self):
+                pass
+        return R()
 
 
 @pytest.fixture(autouse=True)
@@ -328,13 +360,21 @@ def _fresh_ifs_state(monkeypatch):
     monkeypatch.setattr(IfsSource, "_t_first", None)
 
 
-def _ifs(monkeypatch, tmp_path, plan):
+def _ifs(monkeypatch, tmp_path, plan, http=None):
     pytest.importorskip("ecmwf.opendata")
     import ecmwf.opendata as eo
     from pwpf_blender.sources.noaa_sources import IfsSource
     _FakeClient.plan, _FakeClient.seen = plan, []
     monkeypatch.setattr(eo, "Client", _FakeClient)
+    monkeypatch.setattr(nh, "_request", http or _FakeHttp())
     return IfsSource("ifs_ens", True, source="aws", save_dir=tmp_path)
+
+
+def _expected():
+    out = bytearray()
+    for o, n in PARTS:
+        out += bytes((o + i) % 251 for i in range(n))
+    return bytes(out)
 
 
 def test_ifs_client_retries_are_capped(tmp_path, monkeypatch):
@@ -343,14 +383,45 @@ def test_ifs_client_retries_are_capped(tmp_path, monkeypatch):
     src._retrieve(datetime(2026, 1, 15, 0), [6, 12], 3, "sfc")
     kw = _FakeClient.seen[0]
     assert kw["maximum_retries"] == 3 and kw["retry_after"] == [5, 20, 2]        # library default is 500 x 120 s
-    assert any("ecmwf-forecasts" in k for k in nh._policies)
+
+
+def test_ifs_ranges_are_fetched_through_the_polite_layer_and_assembled(tmp_path, monkeypatch):
+    from datetime import datetime
+    http = _FakeHttp()
+    src = _ifs(monkeypatch, tmp_path, {}, http)
+    path = src._retrieve(datetime(2026, 1, 15, 0), [6], 3, "sfc")
+    assert path.read_bytes() == _expected()
+    assert http.calls == [("aws", 0, 7), ("aws", 1_000_000, 1_000_005)]            # the adjacent messages share one request
 
 
 def test_ifs_falls_back_to_another_mirror(tmp_path, monkeypatch):
     from datetime import datetime
     src = _ifs(monkeypatch, tmp_path, {"aws": "503 Service Unavailable"})
     path = src._retrieve(datetime(2026, 1, 15, 0), [6, 12], 3, "sfc")
-    assert [k["source"] for k in _FakeClient.seen] == ["aws", "google"] and path.read_bytes() == b"GRIB"
+    assert [k["source"] for k in _FakeClient.seen] == ["aws", "google"] and path.read_bytes() == _expected()
+
+
+def test_ifs_resumes_on_the_next_mirror_without_refetching(tmp_path, monkeypatch):
+    from datetime import datetime
+    http = _FakeHttp()
+    calls = http.calls
+
+    def flaky(url, headers=None, **k):
+        if "aws" in url and len([c for c in calls if c[0] == "aws"]) >= 1:
+            calls.append(("aws", 0, 0))
+            raise nh.FetchError(f"{url}: gave up after 5 attempts (last: HTTP 503)")
+        return http(url, headers=headers)
+    src = _ifs(monkeypatch, tmp_path, {}, flaky)
+    path = src._retrieve(datetime(2026, 1, 15, 0), [6], 3, "sfc")
+    assert path.read_bytes() == _expected()
+    assert [c for c in calls if c[0] == "google"] == [("google", 1_000_000, 1_000_005)]        # only the missing range is asked again
+
+
+def test_ifs_rejects_a_server_that_ignores_the_range(tmp_path, monkeypatch):
+    from datetime import datetime
+    src = _ifs(monkeypatch, tmp_path, {}, _FakeHttp(status=200))
+    with pytest.raises(nh.FetchError, match="every mirror"):
+        src._retrieve(datetime(2026, 1, 15, 0), [6], 3, "sfc")
 
 
 def test_ifs_gives_up_when_every_mirror_fails_and_stops_on_404(tmp_path, monkeypatch):
@@ -359,7 +430,7 @@ def test_ifs_gives_up_when_every_mirror_fails_and_stops_on_404(tmp_path, monkeyp
     with pytest.raises(nh.FetchError, match="every mirror"):
         src._retrieve(datetime(2026, 1, 15, 0), [6], 3, "sfc")
     assert len(_FakeClient.seen) == 4 and not list(tmp_path.glob("*.grib2*"))
-    src = _ifs(monkeypatch, tmp_path, {"aws": "404 Not Found"})
+    src = _ifs(monkeypatch, tmp_path, {"aws": "404 Client Error: Not Found for url"})
     with pytest.raises(nh.FetchError):
         src._retrieve(datetime(2026, 1, 15, 0), [6], 4, "sfc")
     assert [k["source"] for k in _FakeClient.seen] == ["aws"]                      # not published: no point asking others
