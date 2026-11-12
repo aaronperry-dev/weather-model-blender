@@ -303,21 +303,82 @@ def test_prism_request_that_was_not_served_is_not_counted(tmp_path):
 
 
 # ------------------------------------------------------------------ ECMWF client
-def test_ifs_client_retries_are_capped(tmp_path, monkeypatch):
+class _FakeClient:
+    """Stands in for ecmwf.opendata.Client; behaviour per mirror is scripted through `plan`."""
+    plan: dict = {}
+    seen: list = []
+
+    def __init__(self, **kw):
+        import requests
+        type(self).seen.append(kw)
+        self.kw, self.session = kw, requests.Session()
+
+    def retrieve(self, **req):
+        act = type(self).plan.get(self.kw["source"], "ok")
+        if act != "ok":
+            Path(req["target"]).write_bytes(b"GR")                 # a truncated file must not survive the failure
+            raise RuntimeError(act)
+        Path(req["target"]).write_bytes(b"GRIB")
+
+
+def _ifs(monkeypatch, tmp_path, plan):
     pytest.importorskip("ecmwf.opendata")
     import ecmwf.opendata as eo
-    from datetime import datetime
     from pwpf_blender.sources.noaa_sources import IfsSource
-    seen = {}
+    _FakeClient.plan, _FakeClient.seen = plan, []
+    monkeypatch.setattr(eo, "Client", _FakeClient)
+    return IfsSource("ifs_ens", True, source="aws", save_dir=tmp_path)
 
-    class FakeClient:
-        def __init__(self, **kw):
-            seen.update(kw)
 
-        def retrieve(self, **req):
-            Path(req["target"]).write_bytes(b"GRIB")
-    monkeypatch.setattr(eo, "Client", FakeClient)
-    src = IfsSource("ifs_ens", True, source="aws", save_dir=tmp_path)
+def test_ifs_client_retries_are_capped(tmp_path, monkeypatch):
+    from datetime import datetime
+    src = _ifs(monkeypatch, tmp_path, {})
     src._retrieve(datetime(2026, 1, 15, 0), [6, 12], 3, "sfc")
-    assert seen["maximum_retries"] == 5 and seen["retry_after"] == 20          # library default is 500 x 120 s
-    assert "ecmwf-forecasts" in next(iter(nh._policies)) or any("amazonaws" in k for k in nh._policies)
+    kw = _FakeClient.seen[0]
+    assert kw["maximum_retries"] == 4 and kw["retry_after"] == [10, 40, 2]        # library default is 500 x 120 s
+    assert any("ecmwf-forecasts" in k for k in nh._policies)
+
+
+def test_ifs_falls_back_to_another_mirror(tmp_path, monkeypatch):
+    from datetime import datetime
+    src = _ifs(monkeypatch, tmp_path, {"aws": "503 Service Unavailable"})
+    path = src._retrieve(datetime(2026, 1, 15, 0), [6, 12], 3, "sfc")
+    assert [k["source"] for k in _FakeClient.seen] == ["aws", "google"] and path.read_bytes() == b"GRIB"
+
+
+def test_ifs_gives_up_when_every_mirror_fails_and_stops_on_404(tmp_path, monkeypatch):
+    from datetime import datetime
+    src = _ifs(monkeypatch, tmp_path, {m: "503 Service Unavailable" for m in ("aws", "google", "azure", "ecmwf")})
+    with pytest.raises(nh.FetchError, match="every mirror"):
+        src._retrieve(datetime(2026, 1, 15, 0), [6], 3, "sfc")
+    assert len(_FakeClient.seen) == 4 and not list(tmp_path.glob("*.grib2*"))
+    src = _ifs(monkeypatch, tmp_path, {"aws": "404 Not Found"})
+    with pytest.raises(nh.FetchError):
+        src._retrieve(datetime(2026, 1, 15, 0), [6], 4, "sfc")
+    assert [k["source"] for k in _FakeClient.seen] == ["aws"]                      # not published: no point asking others
+
+
+def test_limiter_penalty_delays_every_thread():
+    ft = FakeTime()
+    lim = nh.Limiter(rate=2.0, burst=2, clock=ft.clock, sleep=ft.sleep)
+    lim.penalise(10.0)                                    # 20 tokens of debt on a bucket holding 2
+    assert lim.acquire() == pytest.approx(9.5)            # next request waits until the debt is paid (+1 token)
+    lim.penalise(1000.0)
+    assert lim.acquire() == pytest.approx(60.5, abs=0.6)  # debt is capped at 60 s
+
+
+def test_session_adapter_paces_counts_and_penalises(server, monkeypatch):
+    import requests
+    sc, base = server
+    sc.plan = [(200, {}, b"ok"), (503, {}, b""), (200, {}, b"ok")]
+    ft = FakeTime()
+    pol = nh.policy_for(base + "/x")
+    pol.limiter = nh.Limiter(rate=2.0, burst=1, clock=ft.clock, sleep=ft.sleep)
+    s = requests.Session()
+    nh.mount_polite(s)
+    assert s.get(base + "/a").status_code == 200
+    assert s.get(base + "/b").status_code == 503                                   # 0.5 s pacing, then the 503 costs 15 s
+    assert s.get(base + "/c").status_code == 200
+    assert ft.t - 100.0 >= 0.5 + nh.THROTTLE_PENALTY_S - 1                        # third request waited out the penalty
+    rep = nh.STATS.report()
+    assert "3 requests" in rep and "1 throttled" in rep
