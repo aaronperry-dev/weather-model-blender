@@ -54,14 +54,8 @@
     return Math.max(x, 0);
   }
 
-  // 8-bit log decoding used by pwpf_blender/export.py
-  function decodeLUT(enc) {
-    var lut = new Float32Array(256), k = Math.log(1 + enc.xmax / enc.A);
-    for (var v = 0; v < 256; v++) lut[v] = enc.A * (Math.exp(v / 255 * k) - 1);
-    return lut;
-  }
   var S_FLOOR = 1e-3;
 
   return { erfc: erfc, ndtr: ndtr, ndtri: ndtri, exceedance: exceedance, percentile: percentile,
-           decodeLUT: decodeLUT, S_FLOOR: S_FLOOR };
+           S_FLOOR: S_FLOOR };
 });

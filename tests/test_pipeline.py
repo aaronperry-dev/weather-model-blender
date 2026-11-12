@@ -4,7 +4,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PIL import Image
 
 from pwpf_blender import binormal, export
 from pwpf_blender.config import load_config
@@ -184,28 +183,82 @@ def test_manifest_reports_prism_downscaling(synthetic_run, tmp_path):
     assert json.loads((tmp_path / "d" / "manifest.json").read_text())["prism_downscale"] is False
 
 
-def test_png_roundtrip_matches_fields(synthetic_run):
+def test_bin_roundtrip_matches_fields(synthetic_run):
     cfg, res, out = synthetic_run
     man = json.loads((out / "manifest.json").read_text())
-    assert man["members_total"] == 34 and len(man["windows"]) == 15
+    assert man["members_total"] == 34 and len(man["windows"]) == 15 and man["format"] == "pwpb1"
     w0 = man["windows"][0]
-    assert (w0["id"], w0["length_h"], w0["end_h"]) == ("s24_f024", 24, 24)
-    img = np.array(Image.open(out / "s24_f024.png"))
-    assert img.shape[:2] == (man["size"][1], man["size"][0]) and img.shape[2] == 3
+    assert (w0["id"], w0["length_h"], w0["end_h"]) == ("s24_f024", 24, 24) and w0["file"] == "s24_f024.bin.gz"
+    assert not list(out.glob("*.png"))                                   # data layers are .bin.gz only
+    b = export.read_bin(out / "s24_f024.bin.gz")
+    assert (b["height"], b["width"]) == (man["size"][1], man["size"][0]) and set(b["planes"]) == {1, 2, 3, 4, 5}
     mg = export.MercatorGrid.build(res.grid, cfg["web"]["px_m"])
     ref = mg.reproject(res.windows["s24_f024"]["mode"])
-    dec = export.decode(img[..., 0])
+    dec = b["planes"][1]
     sel = ref > 0.5
-    rel = np.abs(dec[sel] - ref[sel]) / ref[sel]
-    assert rel.max() < 0.03                                          # ~2 % encoding error
+    tol = 2e-3 if man["bits"] == 16 else 3e-2
+    assert (np.abs(dec[sel] - ref[sel]) / ref[sel]).max() < tol         # log-encoding precision of the configured bit depth
     assert dec[~mg.inside].max() == 0.0
+    pot, sl = b["planes"][4], b["planes"][5]
+    assert (pot[sel] > 0).all() and sl.min() >= -500.01 and sl.max() <= 5875.01
+    sl_ref = mg.reproject(res.windows["s24_f024"]["sl"])
+    assert np.abs(sl[mg.inside] - sl_ref[mg.inside]).max() <= (0.06 if man["bits"] == 16 else 12.6)
+    t = export.read_bin(out / "terrain_ref.bin.gz")["planes"][6]
+    assert np.abs(t - mg.reproject(res.terrain)).max() <= 0.26                # terrain is always 16 bit
+    assert man["terrain"]["file"] == "terrain_ref.bin.gz" and man["terrain"]["dem_url"].startswith("https://s3.amazonaws.com/elevation-tiles-prod/terrarium/")
 
 
-def test_encode_decode_precision():
+def test_16bit_option_and_terrain_can_be_disabled(synthetic_run, tmp_path):
+    cfg, res, _ = synthetic_run
+    c2 = {**cfg, "web": {**cfg["web"], "bin_bits": 16, "terrain": {"enabled": False}}}
+    export.write_site(res, c2, tmp_path / "d")
+    man = json.loads((tmp_path / "d" / "manifest.json").read_text())
+    assert man["terrain"] is None and man["bits"] == 16 and not (tmp_path / "d" / "terrain_ref.bin.gz").exists()
+    b = export.read_bin(tmp_path / "d" / "s24_f024.bin.gz")
+    assert set(b["planes"]) == {1, 2, 3}
+    ref = export.MercatorGrid.build(res.grid, cfg["web"]["px_m"]).reproject(res.windows["s24_f024"]["mode"])
+    sel = ref > 0.5
+    assert (np.abs(b["planes"][1][sel] - ref[sel]) / ref[sel]).max() < 2e-3
+
+
+def test_8bit_default_files_are_smaller_than_16bit(synthetic_run, tmp_path):
+    cfg, res, _ = synthetic_run
+    size = {}
+    for bits in (8, 16):
+        d = tmp_path / f"b{bits}"
+        export.write_site(res, {**cfg, "web": {**cfg["web"], "bin_bits": bits}}, d)
+        size[bits] = (d / "s24_f024.bin.gz").stat().st_size
+        assert set(export.read_bin(d / "s24_f024.bin.gz")["planes"]) == {1, 2, 3, 4, 5}
+    assert size[8] < 0.7 * size[16]
+
+
+def test_bin_is_compact_and_self_describing(tmp_path):
+    rng = np.random.default_rng(1)
+    h, w = 120, 160
+    yy, xx = np.mgrid[0:h, 0:w]
+    mode = 10 * np.exp(-(((xx - 80) / 30) ** 2 + ((yy - 60) / 20) ** 2))
+    planes = [{"id": 1, "bits": 16, "kind": "log", "p0": 0.5, "p1": 200.0, "data": export.encode_log(mode, 0.5, 200.0)},
+              {"id": 5, "bits": 16, "kind": "linear", "p0": 0.1, "p1": -500.0,
+               "data": export.encode_linear(1000 + 2 * xx + rng.normal(0, 0.3, (h, w)), 0.1, -500.0)}]
+    path = tmp_path / "t.bin.gz"
+    export.write_bin(path, w, h, planes)
+    assert path.stat().st_size < 0.5 * (2 * 2 * h * w)                  # smooth fields compress well below raw size
+    r = export.read_bin(path)
+    assert r["width"] == w and r["height"] == h
+    assert np.abs(r["planes"][1] - mode).max() < 3e-3 * 10 + 1e-3
+    assert np.abs(r["planes"][5] - (1000 + 2 * xx)).max() < 2.0
+    assert export.read_bin(path.read_bytes())["planes"][1].shape == (h, w)        # also from bytes
+    with pytest.raises(AssertionError):
+        export.read_bin(b"nope" + bytes(40))
+
+
+def test_log_encoding_precision_8_and_16_bit():
     x = np.array([0.0, 0.01, 0.1, 1, 5, 20, 80, 150])
-    d = export.decode(export.encode(x))
-    assert d[0] == 0
-    assert np.all(np.abs(d[2:] - x[2:]) <= np.maximum(0.006, 0.025 * x[2:]))   # <=0.006 in or 2.5 %
+    for bits, tol in ((8, 0.025), (16, 1e-4)):
+        pl = [{"id": 1, "bits": bits, "kind": "log", "p0": 0.5, "p1": 200.0, "data": export.encode_log(x[None, :], 0.5, 200.0, bits)}]
+        d = export.read_bin(export.pack_planes(len(x), 1, pl))["planes"][1][0]
+        assert d[0] == 0
+        assert np.all(np.abs(d[2:] - x[2:]) <= np.maximum(0.006 if bits == 8 else 1e-4, tol * x[2:]))
 
 
 def test_lite_profile_reduces_members_and_stride():
@@ -277,13 +330,15 @@ def test_synthetic_run_has_ice_layers(synthetic_run):
     with_ice = [x for x in man["windows"] if x["ice_file"]]
     assert {x["id"] for x in with_ice} == set(res.ice)
     assert man["products"]["ice"]["encoding"] == {"A": export.ICE_ENC_A, "xmax": export.ICE_ENC_XMAX}
-    img = np.array(Image.open(out / with_ice[0]["ice_file"]))
+    assert with_ice[0]["ice_file"].endswith("_ice.bin.gz")
+    b = export.read_bin(out / with_ice[0]["ice_file"])
+    assert set(b["planes"]) == {1, 2, 3}                                  # no terrain planes for freezing rain
     wid = with_ice[0]["id"]
     mg = export.MercatorGrid.build(res.grid, cfg["web"]["px_m"])
     ref = mg.reproject(res.ice[wid]["mode"])
-    dec = export.decode(img[..., 0], export.ICE_ENC_A, export.ICE_ENC_XMAX)
+    dec = b["planes"][1]
     sel = ref > 0.01
-    assert sel.any() and (np.abs(dec[sel] - ref[sel]) / ref[sel]).max() < 0.03
+    assert sel.any() and (np.abs(dec[sel] - ref[sel]) / ref[sel]).max() < (2e-3 if man["bits"] == 16 else 5e-2)   # lowest ice levels are ~0.4 mm apart
 
 
 def test_ice_48h_mode_is_sum_of_24h_ice_modes(synthetic_run):

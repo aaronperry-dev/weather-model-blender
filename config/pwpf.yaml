@@ -67,7 +67,17 @@ static:
   prism:   static/prism_ppt_monthly_2p5km.npy
 
 web:
-  px_m: 3000                 # Web-Mercator pixel size of the data PNGs (m); bigger = smaller files
+  px_m: 3000                 # Web-Mercator pixel size of the data layers (m); bigger = smaller files
+  bin_bits: 8                # precision of the .bin.gz planes: 8 (~2 %, ~1-3 MB per period) or 16 (~0.01 %, ~4x larger)
+  terrain:                   # browser-side terrain adjustment (AWS Terrain Tiles); see README "Terrain adjustment"
+    enabled: true
+    precip_gradient_per_km: 0.20       # +20 %/km of elevation above the model terrain (our assumption, capped below)
+    precip_factor_range: [0.75, 1.35]
+    snow_level_width_m: 100            # rain/snow transition width around the 0.5 degC wet-bulb level
+    max_phase_ratio: 3.0
+    min_zoom: 5
+    dem_max_zoom: 12
+    hillshade: true
 
 # ---- ensemble members -----------------------------------------------------------------------
 # run_hours/age_h/lags_h choose the model initialisation for a cycle:  latest run hour <= cycle - age_h,

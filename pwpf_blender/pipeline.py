@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 
 import numpy as np
 
+from .constants import SNOW_LEVEL_WARM
+
 from . import binormal, mode as modemod
 from .downscale import PrismDownscaler
 from .grid import GridSpec
@@ -158,6 +160,46 @@ class Results:
     members: list = field(default_factory=list)          # per member: label, group, init, ok, bins_ok, error, ...
     skipped: list = field(default_factory=list)          # windows not produced: [{id, n_members, reason}]
     meta: dict = field(default_factory=dict)
+    terrain: np.ndarray | None = None     # 2.5 km model terrain (m), exported for the browser's terrain adjustment
+
+
+class AuxAccumulator:
+    """Per 6-h bin sums that let the browser's terrain adjustment work: the weighted mean potential snowfall (inches if
+    all liquid fell as snow) and the QPF-weighted snow level, over the members that delivered the bin.  Window values
+    are the sum over bins (potential) and the ratio of sums (snow level)."""
+
+    def __init__(self, nbins: int, shape):
+        self.shape, self.nbins = shape, nbins
+        self.pot = [None] * nbins
+        self.sln = [None] * nbins
+        self.sld = [None] * nbins
+        self.w = np.zeros(nbins, np.float64)
+        self._lock = threading.Lock()
+
+    def add(self, k: int, weight: float, aux: dict | None):
+        with self._lock:
+            self.w[k] += weight
+            if not aux:
+                return
+            if self.pot[k] is None:
+                self.pot[k], self.sln[k], self.sld[k] = (np.zeros(self.shape, np.float32) for _ in range(3))
+            self.pot[k] += weight * aux["pot"]
+            self.sln[k] += weight * aux["q"] * aux["sl"]
+            self.sld[k] += weight * aux["q"]
+
+    def window(self, k0: int, k1: int):
+        """(potential snowfall in, snow level m) for bins [k0, k1); snow level is the warm sentinel where nothing fell."""
+        pot = np.zeros(self.shape, np.float32)
+        num = np.zeros(self.shape, np.float32)
+        den = np.zeros(self.shape, np.float32)
+        for k in range(k0, k1):
+            if self.pot[k] is None or self.w[k] <= 0:
+                continue
+            pot += self.pot[k] / np.float32(self.w[k])
+            num += self.sln[k]
+            den += self.sld[k]
+        sl = np.where(den > 0, num / np.maximum(den, 1e-6), SNOW_LEVEL_WARM).astype(np.float32)
+        return pot, sl
 
 
 class Pipeline:
@@ -181,13 +223,13 @@ class Pipeline:
             return self._regrid[sg.key]
 
     # ------------------------------------------------------------------ one member, one bin
-    def member_bin(self, run: MemberRun, b0: datetime, b1: datetime, ctx: BinContext):
+    def member_bin(self, run: MemberRun, b0: datetime, b1: datetime, ctx: BinContext, aux: dict | None = None):
         r = run
         if (b1 - r.init).total_seconds() / 3600.0 > r.max_fxx_h and r.fallback is not None:
             r = r.fallback
         steps = r.source.load_steps(r.init, b0, b1, r.member)
         reg = self.regridder(r.source)
-        return bin_products(steps, reg, ctx, native_ptype=r.native_ptype, src_dx_km=r.source.src_dx_km)
+        return bin_products(steps, reg, ctx, native_ptype=r.native_ptype, src_dx_km=r.source.src_dx_km, aux=aux)
 
     # ------------------------------------------------------------------ whole run
     def run(self, cycle: datetime) -> Results:
@@ -208,6 +250,7 @@ class Pipeline:
         limit = int(cfg.get("member_failure_limit", 2))
         ny, nx = self.grid.shape
         ice_on = cfg.get("ice", {}).get("enabled", True)
+        self._aux = AuxAccumulator(nbins, (ny, nx)) if cfg.get("web", {}).get("terrain", {}).get("enabled", True) else None
         snow_bins: list[np.ndarray] = []                    # per 6-h bin: (n, ny, nx) float16 snowfall (in)
         ice_bins: list[dict] = []                           # per bin: {member index: (ny, nx) float16 ice (in)}
         for k in range(nbins):
@@ -230,6 +273,7 @@ class Pipeline:
         weights = np.array([r.weight for r in runs], np.float32)
 
         res = Results(cycle=cycle, grid=self.grid)
+        res.terrain = self.terrain if self._aux is not None else None
         res.members = [{"label": r.label, "group": r.group, "member": "" if r.member is None else str(r.member),
                         "init": r.init.isoformat(), "weight": r.weight, "max_fxx_h": r.max_fxx_h, "note": r.note,
                         "fallback": r.fallback.group if r.fallback else None,
@@ -312,6 +356,8 @@ class Pipeline:
                     del x
             fit.update(start=sp.start, end=sp.end, label=sp.label, length_h=sp.length_h, end_h=sp.end_h,
                        n_members=n, reduced=bool(n < warn_members))
+            if not ice and getattr(self, "_aux", None) is not None:
+                fit["pot"], fit["sl"] = self._aux.window(k0, k1)
             (res.ice if ice else res.windows)[sp.id] = fit
             log.info("%s %s fitted from %d/%d members: max mode %.2f in, max p95 %.2f in",
                      "ice" if ice else "snow", sp.id, n, n_all, float(md.max()),
@@ -341,11 +387,14 @@ class Pipeline:
         """Fill `snow[i]` (float16) and `ice[i]` (only when non-zero) for every member that delivers this bin.
         A member that fails is simply absent from this bin (the windows that need it will not use it); after
         `limit` consecutive failures it is no longer tried, so a missing run does not burn the request budget."""
+        aux_acc = getattr(self, "_aux", None)
+
         def work(i):
             if dead[i]:
                 return i, None
             try:
-                return i, self.member_bin(runs[i], b0, b1, ctx)
+                aux = {} if aux_acc is not None else None
+                return i, (self.member_bin(runs[i], b0, b1, ctx, aux), aux)
             except Exception as e:                           # noqa: BLE001
                 log.warning("member %s failed in bin %s: %s", runs[i].label, b0, e)
                 return i, e
@@ -358,7 +407,9 @@ class Pipeline:
                     if fails[i] >= limit:
                         dead[i] = True
                 elif out is not None:
-                    sn, ic = out
+                    (sn, ic), aux = out
+                    if aux_acc is not None:
+                        aux_acc.add(k, float(runs[i].weight), aux)
                     snow[i] = sn
                     avail[i, k] = True
                     fails[i] = 0

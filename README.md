@@ -8,9 +8,9 @@ GitHub Pages only serves static files, so the project splits into two parts:
 
 ```
 GitHub Actions (cron, 2x/day)                      GitHub Pages (static)
-  Python pipeline  ──►  data PNGs + manifest.json ──►  web/ viewer (Leaflet + binormal maths in JS)
-  (this package)                                      one small image per period serves every
-                                                      threshold / percentile product
+  Python pipeline  ──►  .bin.gz layers + manifest ──►  web/ viewer (Leaflet; binormal maths, interpolation,
+  (this package)                                      terrain adjustment and colouring all in the browser;
+                                                      one small file per period serves every product)
 ```
 
 ## Status of the real product (read first)
@@ -103,7 +103,7 @@ All HTTP goes through one polite client (`noaa_http._request`), so no server's r
 | Server | Published limit | What this client does |
 |---|---|---|
 | NOMADS / NCEP ftp (`nomads.ncep.noaa.gov`, `ftp(prd).ncep.noaa.gov`) | 120 hits/min per IP, summed over those hosts, HEAD counts like GET ([SCN 21-32](https://www.weather.gov/media/notification/pdf2/scn21-32nomad_changes.pdf)) | ≤ 60 requests/min in total, 2 connections; only used if AWS fails |
-| AWS open-data buckets (NOAA, ECMWF mirror) | none published; S3 answers `503 SlowDown` when a prefix is hammered | ≤ 20 requests/s and 6 connections per NOAA bucket (10 and 4 elsewhere, 4/s and 2 for the ECMWF mirror, where every ranged GET the ecmwf-opendata client makes is paced and counted); back-off on 503, shared by all threads; if a mirror keeps failing the IFS download moves on to google, azure, then data.ecmwf.int |
+| AWS open-data buckets (NOAA, ECMWF mirror) | none published; S3 answers `503 SlowDown` when a prefix is hammered | ≤ 20 requests/s and 6 connections per NOAA bucket (10 and 4 elsewhere, 4/s and 2 for the ECMWF mirror, where the IFS byte ranges are fetched by our own resumable downloader: each range is paced, counted and retried with back-off, finished ranges are never fetched twice, even after a switch of mirror); back-off on 503, shared by all threads; if a mirror keeps failing the IFS download moves on to google, azure, then data.ecmwf.int and the failing mirror is tried last from then on; IFS downloads stop after 45 min (`PWPF_IFS_BUDGET_MIN`) so the run still finishes with the members it has; `PWPF_IFS_SOURCE=aws|google|azure|ecmwf` picks the first mirror |
 | ECMWF open data | 500 simultaneous connections | ≤ 2 requests/s; `ecmwf-opendata` retries capped at 3 (library default is 500 × 120 s) |
 | PRISM | refuses a file downloaded twice within 24 h | one request every 2 s, one connection, files streamed to disk once, a ledger refuses to re-request a file inside 24 h, raw files cached between workflow runs |
 
@@ -176,22 +176,62 @@ pwpf_blender/            Python package
   mode.py binormal.py    deterministic mode + binormal fit / CDF / percentiles
   ice.py                 simplified FRAM freezing-rain accumulation
   pipeline.py            members → 6-h bins → rolling 24/48/72 h windows (snow + ice)
-  export.py              Web-Mercator data PNGs, manifest.json, npz
+  export.py              Web-Mercator .bin.gz data layers (PWPB format), manifest.json, npz
   sources/               synthetic (tests/demo) and live loaders
   validate.py external.py static_data.py cli.py
-web/                     static viewer: Leaflet UI (app.js), DOM-free logic (core.js, binormal.js)
+web/                     static viewer: Leaflet UI (app.js), DOM-free logic (core.js, binormal.js, bin.js, terrain.js)
 config/pwpf.yaml         members, science settings, profiles (lite, synthetic)
 .github/workflows/       scheduled build + Pages deploy
 tests/                   physics, grid, binormal, end-to-end, Python↔JS parity
 ```
 
-### How the viewer gets every product from one PNG per period
-Freezing-rain layers (`<id>_ice.png`, only for periods where some member produces ice) use the same scheme with a finer
-log scale (A = 0.02, max 2 in); the manifest's `products` block carries each hazard's encoding, thresholds and unit.
-Each period's PNG stores three numbers per pixel — mode, σ_low, σ_high (log-encoded to 8 bits, ≈2 % precision,
-alpha always 255). The browser rebuilds P(snow ≥ t) and any percentile with the same binormal CDF as Python
-(`tests/test_js_parity.py` verifies agreement), so one ~0.3 MB image serves ten thresholds and seven percentiles, plus
-hover read-outs. Full precision stays in the npz artifact.
+### How the viewer gets every product from one `.bin.gz` per period
+There are no image layers: every period is one gzip-compressed binary file, `<id>.bin.gz` (snowfall) and `<id>_ice.bin.gz`
+(freezing rain, only for periods where some member produces ice), plus `terrain_ref.bin.gz` (the model's own terrain height
+on the same grid). The format, "PWPB" v1 (`pwpf_blender/export.py`, reader in `web/bin.js`):
+
+```
+header   "PWPB" | u8 version=1 | u8 planes | u8 flags (bit0: 16-bit planes are byte-shuffled) | u8 0 | u16 W | u16 H
+per plane (12 B)  u8 id | u8 bits (8|16) | u8 kind (0 log, 1 linear) | u8 0 | f32 p0 | f32 p1
+data     the planes, row-major; 16-bit planes store all high bytes, then all low bytes (compresses far better)
+log      x = p0 * (exp(v / vmax * ln(1 + p1/p0)) - 1)        linear   x = v * p0 + p1
+planes   1 mode, 2 sigma_low, 3 sigma_high (in; log: snow A=0.5, max 200 in; ice A=0.02, max 2 in)
+         4 potential snowfall (in), 5 snow level (m), 6 model terrain (m)   <- planes 4-6 only for snowfall (terrain adjustment)
+```
+`web.bin_bits: 8` (default) gives ~2 % steps in the log-encoded planes and 25 m steps in snow level, ~1-3 MB per period for a CONUS-size grid; `16` keeps ~0.01 % / 0.1 m but is about four times larger (the low bytes are noise to gzip). 2 % steps are far below the width of a colour class and are smoothed away by the per-pixel interpolation. Everything after download is
+done by the browser: gunzip (`DecompressionStream`; a server that already decoded the gzip is handled too), the binormal CDF
+and percentiles at every pixel (`tests/test_js_parity.py` checks them against Python, also for the 8-bit variant), palette
+classification, terrain adjustment, hill-shading and the point read-outs. Full precision stays in the npz artifact.
+
+**Drawing and interpolation.** The map layer is a Leaflet `GridLayer` (`DataLayer` in `web/app.js`). Every *screen* pixel of
+a tile interpolates mode / σ_low / σ_high from the data grid, evaluates the product and is classified, so class boundaries
+are smooth curves at every zoom level instead of blocky data cells. Interpolation is bilinear, switching to Catmull-Rom
+bicubic once a data cell spans 8 or more screen pixels (i.e. when the grid would otherwise look coarse); `PWPFCore.renderTile`
+takes `interp: 'auto' | 'bilinear' | 'bicubic'`. A dense retina tile with bicubic + terrain adjustment renders in about
+0.1 s in Node (`tests/test_tiles.py`). Interpolation only smooths: the real detail is the model grid (2.5 km data,
+resampled to `web.px_m`), which no file format can add to.
+
+### Terrain adjustment (browser side, optional)
+When "Terrain adjustment" is ticked (default; `web.terrain.enabled` in the config switches the planes on/off for everybody),
+the viewer fetches [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (Terrarium PNG elevation, keyless,
+CORS-enabled; the only PNGs the project uses are these third-party elevation tiles) for the visible map at zoom
+`min(z, dem_max_zoom)` and, per screen pixel, multiplies mode and both sigmas by a factor `k` that depends on the difference
+between the true ground height `zp` and the model's terrain height `zr`:
+
+* **Elevation gradient** `fq = 1 + 0.20 /km * (zp - zr)`, limited to [0.75, 1.35].
+* **Rain/snow line** `rho` = ratio of the snow fraction at `zp` to that at `zr` (a logistic of width 100 m centred on the
+  per-pixel 0.5 °C wet-bulb snow level the pipeline exports), regularised and capped at 3. Valleys below the line lose snow,
+  ridges above it gain it.
+* `k = fq * rho`, never more than `fq * potential_snowfall / mode`: you can't get more snow than all the precipitation
+  falling as snow. At the model terrain height `k` is exactly 1.
+
+**These numbers are our assumptions, not part of WPC's published method** (WPC's PWPF relies on PRISM downscaling plus the
+snow-level mask, which the pipeline already applies). The adjustment is therefore a display-time option: untick it to see
+the pure blend. It only applies from zoom `min_zoom` (5) and to snowfall, not freezing rain. If the elevation tiles can't be
+fetched (offline, blocked) the viewer falls back to the unadjusted field and says so. The point read-out shows ground height
+vs model height and the factor applied. An optional hill-shade layer (same tiles) helps to see why the pattern follows
+ridges. Terrain data: Mapzen / AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1 and others); the attribution is added to
+the map when the layer is in use.
 
 ## Performance
 Full 2.5 km grid (3.0 M points), synthetic 34-member run: ~75 s and ~3.6 GB peak RAM. Live runs are dominated by
@@ -200,7 +240,7 @@ downloads (ECMWF ENS is the heaviest: use `lite` or fewer members on small runne
 ## Licences / attribution
 Code: no licence file is included yet — add the one you want before publishing. Model data: NOAA/NCEP (public domain); ECMWF open data is CC-BY-4.0 (attribution is in
 the page footer); PRISM normals are free to use but check their terms before redistributing raw grids (this repo never
-publishes them). Basemap © OpenStreetMap contributors © CARTO.
+publishes them). Basemap © OpenStreetMap contributors © CARTO. Terrain tiles (optional adjustment / hill-shade): AWS Terrain Tiles (Mapzen; USGS 3DEP, SRTM, GMTED2010, ETOPO1).
 
 ## Roadmap
 SREF loader · NBM SLR / snow-level percentiles as optional inputs · ice (freezing-rain) products

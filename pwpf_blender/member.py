@@ -17,7 +17,7 @@ from datetime import datetime
 
 import numpy as np
 
-from .constants import (MM_PER_INCH, SNOW_LEVEL_WARM, TYPE_FZRA, TYPE_SNOW)
+from .constants import (MM_PER_INCH, SNOW_LEVEL_COLD, SNOW_LEVEL_WARM, TYPE_FZRA, TYPE_SNOW)
 from .downscale import PrismDownscaler
 from .ice import RADIAL_FACTOR, flat_ice_in
 from .ptype import decision_tree, dominant_type, native_type
@@ -70,9 +70,12 @@ def process_bin(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
 
 
 def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
-                 native_ptype: bool = False, src_dx_km: float = 25.0):
+                 native_ptype: bool = False, src_dx_km: float = 25.0, aux: dict | None = None):
     """(snowfall, ice) in inches over the bin on the destination grid (float32).
-    `ice` is None when the member produced no freezing rain in the bin (or ice is disabled)."""
+    `ice` is None when the member produced no freezing rain in the bin (or ice is disabled).
+    When `aux` (a dict) is given and the member had precipitation, it is filled with the fields the browser's terrain
+    adjustment needs: `pot` (inches if all the liquid fell as snow: QPF x SLR), `sl` (QPF-weighted snow level, m MSL,
+    clipped to the sentinels' range) and `q` (downscaled QPF, mm; the weight for `sl`)."""
     dst_shape = regrid.dst_shape
     ice_on = ctx.ice_cfg.get("enabled", True)
     sshape = steps[0].qpf_mm.shape
@@ -137,6 +140,10 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
 
     snow_mask = (ns2 >= 0.5) | (ctx.terrain_m > sl2)
     snow = (q2 / MM_PER_INCH * slr2 * snow_mask).astype(np.float32)
+    if aux is not None:
+        aux["pot"] = (q2 / MM_PER_INCH * slr2).astype(np.float32)
+        aux["sl"] = np.clip(sl2, SNOW_LEVEL_COLD, SNOW_LEVEL_WARM).astype(np.float32)
+        aux["q"] = q2.astype(np.float32)
     if ice2 is not None:
         if ctx.ice_cfg.get("report", "flat") == "radial":
             ice2 = ice2 * float(ctx.ice_cfg.get("radial_factor", RADIAL_FACTOR))

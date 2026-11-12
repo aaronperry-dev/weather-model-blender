@@ -1,8 +1,8 @@
 /* DOM-free viewer logic: palettes, field computation, point read-out.  Testable in Node. */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./binormal.js'));
-  else root.PWPFCore = factory(root.Binormal);
-})(typeof self !== 'undefined' ? self : this, function (Binormal) {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./binormal.js'), require('./terrain.js'));
+  else root.PWPFCore = factory(root.Binormal, root.PWPFTerrain);
+})(typeof self !== 'undefined' ? self : this, function (Binormal, Terrain) {
   'use strict';
 
   /* Probabilities: ColorBrewer sequential BuPu (blue -> purple), one class per 10 % step from 10 %.  The two
@@ -33,38 +33,124 @@
     return ans;
   }
 
-  /* RGBA(+decoded params) from the data PNG's RGBA pixel buffer. */
-  function decodeParams(rgba, enc) {
-    var lut = Binormal.decodeLUT(enc), n = rgba.length / 4;
-    var mode = new Float32Array(n), lo = new Float32Array(n), hi = new Float32Array(n);
-    for (var i = 0, j = 0; i < n; i++, j += 4) {
-      mode[i] = lut[rgba[j]]; lo[i] = Math.max(lut[rgba[j + 1]], Binormal.S_FLOOR); hi[i] = Math.max(lut[rgba[j + 2]], Binormal.S_FLOOR);
-    }
-    /* "no signal" = encoded zero: mode below the first non-zero level and sigma_high below ~1.5 levels
-       (scales with the encoding, so it works for snowfall A=0.5/200 in and ice A=0.02/2 in) */
-    return { mode: mode, lo: lo, hi: hi, n: n, zeroMode: lut[1] * 0.99, zeroHi: Math.max(lut[1] * 1.5, Binormal.S_FLOOR * 1.01) };
+  /* Parameters from a parsed .bin layer (PWPFBin.parse): mode / sigma_low / sigma_high in inches, plus the optional
+     potential snowfall (`pot`) and snow level (`sl`) planes the terrain adjustment uses.  An encoded zero is "no signal". */
+  function paramsFromBin(bin) {
+    var P = bin.planes, n = bin.W * bin.H, i, step1 = bin.meta[1].step1;
+    var lo = new Float32Array(n), hi = new Float32Array(n), a = P[2], b = P[3], fl = Binormal.S_FLOOR;
+    for (i = 0; i < n; i++) { lo[i] = a[i] > fl ? a[i] : fl; hi[i] = b[i] > fl ? b[i] : fl; }
+    /* "no signal" = encoded zero: mode below the first non-zero level and sigma_high below ~1.5 levels (scales with the
+       encoding, so it works for snowfall A=0.5/200 in and ice A=0.02/2 in, 8 or 16 bit) */
+    return { mode: P[1], lo: lo, hi: hi, n: n, W: bin.W, H: bin.H, pot: P[4] || null, sl: P[5] || null,
+             zeroMode: step1 * 0.99, zeroHi: Math.max(step1 * 1.5, fl * 1.01) };
   }
 
-  /* product: {kind:'prob', t:inches} | {kind:'pct', q:0..100} | {kind:'mode'}, plus pal:'snow'|'ice' for amount maps
-   * returns {rgba: Uint8ClampedArray, value: Float32Array} (value used for read-outs/tests) */
-  function render(params, product, alpha) {
-    var n = params.n, out = new Uint8ClampedArray(n * 4), val = new Float32Array(n);
-    var pal = product.kind === 'prob' ? palettes.prob : (palettes[product.pal] || palettes.snow);
-    var a = Math.round((alpha === undefined ? 0.85 : alpha) * 255);
+  /* Per-cell value of a product (probability %, percentile or mode, in inches), 0 where there is no signal.  Same numbers
+     as render().value but without building colours: the map layer colours it per screen pixel instead. */
+  function field(params, product) {
+    var n = params.n, val = new Float32Array(n);
     for (var i = 0; i < n; i++) {
       var m = params.mode[i], s1 = params.lo[i], s2 = params.hi[i];
-      if (m < params.zeroMode && s2 < params.zeroHi) continue;   // no signal (encoded zeros)
-      var v, idx;
-      if (product.kind === 'prob') { v = 100 * Binormal.exceedance(m, s1, s2, product.t); }
-      else if (product.kind === 'pct') { v = Binormal.percentile(m, s1, s2, product.q / 100); }
-      else { v = m; }
-      val[i] = v;
-      idx = binIndex(pal.stops, v);
-      if (idx < 0) continue;
-      var c = pal.rgb[idx], o = i * 4;
-      out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2]; out[o + 3] = a;
+      if (m < params.zeroMode && s2 < params.zeroHi) continue;
+      val[i] = product.kind === 'prob' ? 100 * Binormal.exceedance(m, s1, s2, product.t)
+             : product.kind === 'pct' ? Binormal.percentile(m, s1, s2, product.q / 100) : m;
     }
-    return { rgba: out, value: val };
+    return val;
+  }
+
+  var HALF = 20037508.342789244;           // half the Web-Mercator world width (m)
+
+  function catmull(t, w) {                 // Catmull-Rom weights for the 4 taps around a point at fraction t
+    var t2 = t * t, t3 = t2 * t;
+    w[0] = -0.5 * t3 + t2 - 0.5 * t; w[1] = 1.5 * t3 - 2.5 * t2 + 1; w[2] = -1.5 * t3 + 2 * t2 + 0.5 * t; w[3] = 0.5 * t3 - 0.5 * t2;
+  }
+
+  /* Colour one map tile at screen resolution, entirely in the browser.
+       o.params   decoded layer (paramsFromBin); o.W/H/merc: its Web-Mercator grid (cells of merc.px metres)
+       o.product  {kind:'prob', t} | {kind:'pct', q} | {kind:'mode'};  o.pal palette;  o.alpha 0..1
+       o.z/tx/ty  map tile; o.size/scale  tile size in CSS px and device scale (canvas is size*scale wide)
+       o.zref     model terrain per cell (m) and o.dem {data, tz, tx, ty, size} the elevation tile covering this map
+                  tile (same or a coarser zoom), o.adjust terrain-adjustment config: when all are given the
+                  distribution at every pixel is rescaled for the true elevation (see terrain.js scale())
+       o.interp   'auto' | 'bilinear' | 'bicubic'
+     Every output pixel interpolates the parameters (bilinear; Catmull-Rom bicubic once a data cell spans >= 8 output
+     pixels, i.e. when the grid would otherwise look coarse), applies the terrain factor, evaluates the product and is
+     classified, so class boundaries are smooth curves at any zoom.  Output: RGBA, alpha = o.alpha where coloured. */
+  function renderTile(o) {
+    var P = o.params, W = P.W, H = P.H, merc = o.merc, pal = o.pal, size = o.size, scale = o.scale, z = o.z, tx = o.tx, ty = o.ty;
+    var n = size * scale, out = new Uint8ClampedArray(n * n * 4), world = size * Math.pow(2, z), a = Math.round(o.alpha * 255);
+    var prod = o.product, mode = P.mode, lo = P.lo, hi = P.hi, zm = P.zeroMode, zh = P.zeroHi, FL = Binormal.S_FLOOR;
+    var dem = o.dem, adj = o.adjust, zref = o.zref, pot = P.pot, sl = P.sl;
+    var useAdj = !!(adj && dem && zref && pot && sl);
+    var cellPx = merc.px * world / (2 * HALF) * scale;
+    var cubic = o.interp === 'bicubic' || (o.interp !== 'bilinear' && cellPx >= 8);
+    var ci = new Int32Array(n), cf = new Float32Array(n), cw = cubic ? new Float32Array(4 * n) : null, du = useAdj ? new Float32Array(n) : null;
+    var wy = new Float32Array(4), wxs = new Float32Array(4), p, q, k;
+    var dd = dem ? z - dem.tz : 0, dsc = Math.pow(2, dd);
+    for (p = 0; p < n; p++) {
+      var g = (((tx * size + (p + 0.5) / scale) / world) * 2 * HALF - HALF - merc.xmin) / merc.px - 0.5, i0 = Math.floor(g);
+      ci[p] = i0; cf[p] = g - i0;
+      if (cubic) { catmull(g - i0, wxs); for (k = 0; k < 4; k++) cw[4 * p + k] = wxs[k]; }
+      if (useAdj) du[p] = (((tx + (p + 0.5) / n) / dsc) - dem.tx) * dem.size - 0.5;
+    }
+    var first = pal.stops[0], tcfg = adj;
+    for (q = 0; q < n; q++) {
+      var gy = (merc.ymax - (HALF - ((ty * size + (q + 0.5) / scale) / world) * 2 * HALF)) / merc.px - 0.5;
+      var j0 = Math.floor(gy), fy = gy - j0;
+      if (j0 < -1 || j0 >= H) continue;
+      var dv = useAdj ? (((ty + (q + 0.5) / n) / dsc) - dem.ty) * dem.size - 0.5 : 0;
+      if (cubic) catmull(fy, wy);
+      var j1 = j0 + 1, r0 = j0 >= 0 ? j0 * W : -1, r1 = j1 < H ? j1 * W : -1;
+      for (p = 0; p < n; p++) {
+        var i = ci[p];
+        if (i < -1 || i >= W) continue;
+        var i1 = i + 1, c00 = r0 >= 0 && i >= 0 ? r0 + i : -1, c10 = r0 >= 0 && i1 < W ? r0 + i1 : -1;
+        var c01 = r1 >= 0 && i >= 0 ? r1 + i : -1, c11 = r1 >= 0 && i1 < W ? r1 + i1 : -1;
+        if (!((c00 >= 0 && (mode[c00] >= zm || hi[c00] >= zh)) || (c10 >= 0 && (mode[c10] >= zm || hi[c10] >= zh)) ||
+              (c01 >= 0 && (mode[c01] >= zm || hi[c01] >= zh)) || (c11 >= 0 && (mode[c11] >= zm || hi[c11] >= zh)))) continue;
+        var fx = cf[p], m, s1, s2;
+        if (cubic && i >= 1 && i + 2 < W && j0 >= 1 && j0 + 2 < H) {
+          m = 0; s1 = 0; s2 = 0;
+          for (var dj = 0; dj < 4; dj++) {
+            var rb = (j0 - 1 + dj) * W + i - 1, wr = wy[dj];
+            for (var di = 0; di < 4; di++) {
+              var wgt = wr * cw[4 * p + di], cc = rb + di;
+              m += wgt * mode[cc]; s1 += wgt * lo[cc]; s2 += wgt * hi[cc];
+            }
+          }
+          if (m < 0) m = 0; if (s1 < FL) s1 = FL; if (s2 < FL) s2 = FL;
+        } else {
+          var w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+          m = (c00 >= 0 ? w00 * mode[c00] : 0) + (c10 >= 0 ? w10 * mode[c10] : 0) + (c01 >= 0 ? w01 * mode[c01] : 0) + (c11 >= 0 ? w11 * mode[c11] : 0);
+          s1 = (c00 >= 0 ? w00 * lo[c00] : w00 * FL) + (c10 >= 0 ? w10 * lo[c10] : w10 * FL) + (c01 >= 0 ? w01 * lo[c01] : w01 * FL) + (c11 >= 0 ? w11 * lo[c11] : w11 * FL);
+          s2 = (c00 >= 0 ? w00 * hi[c00] : w00 * FL) + (c10 >= 0 ? w10 * hi[c10] : w10 * FL) + (c01 >= 0 ? w01 * hi[c01] : w01 * FL) + (c11 >= 0 ? w11 * hi[c11] : w11 * FL);
+        }
+        if (m < zm && s2 < zh) continue;                       // no signal here
+        if (useAdj) {
+          if (c00 >= 0 && c10 >= 0 && c01 >= 0 && c11 >= 0) {      // cells outside the grid carry no terrain / snow level
+            var w0 = (1 - fx) * (1 - fy), w1 = fx * (1 - fy), w2 = (1 - fx) * fy, w3 = fx * fy;
+            var zr = w0 * zref[c00] + w1 * zref[c10] + w2 * zref[c01] + w3 * zref[c11];
+            var slv = w0 * sl[c00] + w1 * sl[c10] + w2 * sl[c01] + w3 * sl[c11];
+            var pt = w0 * pot[c00] + w1 * pot[c10] + w2 * pot[c01] + w3 * pot[c11];
+            var zp = Terrain.sample(dem.data, dem.size, du[p], dv), f = Terrain.scale(zp, zr, slv, pt, m, tcfg);
+            m *= f; s1 *= f; s2 *= f;
+            if (s1 < FL) s1 = FL; if (s2 < FL) s2 = FL;
+          }
+        }
+        var v = prod.kind === 'prob' ? 100 * Binormal.exceedance(m, s1, s2, prod.t)
+              : prod.kind === 'pct' ? Binormal.percentile(m, s1, s2, prod.q / 100) : m;
+        if (v < first) continue;
+        var col = pal.rgb[binIndex(pal.stops, v)], o2 = (q * n + p) * 4;
+        out[o2] = col[0]; out[o2 + 1] = col[1]; out[o2 + 2] = col[2]; out[o2 + 3] = a;
+      }
+    }
+    return out;
+  }
+
+  /* Factor the terrain adjustment applies at one data cell for a point at elevation zp (read-outs). */
+  function terrainFactor(params, i, zref, zp, adj) {
+    if (!adj || !zref || !params.pot || !params.sl) return 1;
+    return Terrain.scale(zp, zref[i], params.sl[i], params.pot[i], params.mode[i], adj);
   }
 
   function pointReadout(params, i, thresholds, percentiles) {
@@ -84,6 +170,6 @@
     return row * w + col;
   }
 
-  return { palettes: palettes, binIndex: binIndex, decodeParams: decodeParams, render: render,
-           pointReadout: pointReadout, lonLatToPixel: lonLatToPixel };
+  return { palettes: palettes, binIndex: binIndex, paramsFromBin: paramsFromBin, field: field, renderTile: renderTile,
+           terrainFactor: terrainFactor, pointReadout: pointReadout, lonLatToPixel: lonLatToPixel };
 });

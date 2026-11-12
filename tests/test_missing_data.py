@@ -77,7 +77,7 @@ def test_periods_with_too_few_members_are_skipped_not_fatal(monkeypatch, tmp_pat
     export.write_site(res, cfg, tmp_path / "d")
     man = json.loads((tmp_path / "d" / "manifest.json").read_text())
     assert {w["id"] for w in man["windows"]} == set(res.windows) and man["windows_skipped"]
-    assert not (tmp_path / "d" / "s72_f072.png").exists()
+    assert not (tmp_path / "d" / "s72_f072.bin.gz").exists()
 
 
 def test_everything_failing_is_an_error_with_reasons(monkeypatch):
