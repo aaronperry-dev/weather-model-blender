@@ -4,8 +4,8 @@
 # RRFS (deterministic + 5-member ensemble, 3 km) and HRRR - the same members NCEP combines into REFS
 # (current + 6 h-old cycle of RRFS det and ens, plus 2 HRRR).  WPC has not published its post-transition
 # constituent list, so treat the CAM part as the best public analogue.
-#   10 GEFS | 25 ECMWF ENS | GFS | ECMWF HRES | GEFS mean | 2 HRRR | 2 RRFS det | 10 RRFS ens | (WPC forecast)
-# Groups not yet implemented as loaders (CMC GEPS/RDPS) are listed under `not_implemented`.
+#   10 GEFS | 25 ECMWF ENS | 10 CMC GEPS (perturbations 1-10, via NOMADS NAEFS copy) | GFS | ECMWF HRES | GEFS mean | 2 HRRR | 2 RRFS det | 10 RRFS ens | (WPC forecast)
+# Groups not yet implemented as loaders are listed under `not_implemented`.
 
 grid:
   stride: 1                  # 1 = full 2.5 km NDFD grid, 2 = 5 km, 4 = 10 km (fast previews)
@@ -76,6 +76,8 @@ web:
 members:
   - {name: gefs,      loader: gefs,       count: 10, pool: 30, pick: random, run_hours: [0,6,12,18], age_h: 6,  max_fxx_h: 240, weight: 1}
   - {name: ifs_ens,   loader: ifs_ens,    count: 25, pool: 50, pick: random, run_hours: [0,12],      age_h: 12, max_fxx_h: 144, weight: 1}
+  - {name: cmce,      loader: cmce,       count: 10, pool: 20, pick: first, run_hours: [0,12],      age_h: 6,  max_fxx_h: 192, weight: 1}
+  - {name: rdps,      loader: rdps,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 4,  max_fxx_h: 84,  fallback: gfs, weight: 1}
   - {name: gefs_mean, loader: gefs,       members: [avg],                    run_hours: [0,6,12,18], age_h: 6,  max_fxx_h: 240, weight: 1}
   - {name: gfs,       loader: gfs,        members: [null],                   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 384, weight: 1}
   - {name: ifs_hres,  loader: ifs_hres,   members: [null],                   run_hours: [0,12],      age_h: 12, max_fxx_h: 144, weight: 1}
@@ -83,9 +85,11 @@ members:
   - {name: rrfs,      loader: rrfs,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 84,  fallback: gfs, weight: 1}
   - {name: rrfs_ens,  loader: rrfs_ens,   members: [1,2,3,4,5], lags_h: [0, 6], run_hours: [0,6,12,18], age_h: 0, max_fxx_h: 60,  fallback: gefs, weight: 1}
 
-not_implemented:             # in WPC's list, no loader here yet (contributions welcome)
-  - CMC GEPS (10 perturbed members, 00Z)
-  - CMC RDPS (00Z, 06Z)
+# Available but not in WPC's list, so off by default: add this line to `members` to include the 15 km Canadian global.
+#   - {name: gdps, loader: gdps, members: [null], run_hours: [0,12], age_h: 6, max_fxx_h: 240, weight: 1}
+# (HRDPS, the 2.5 km Canadian model on dd.weather.gc.ca/model_hrdps/continental, covers only southern Canada and the
+#  northern US, so it cannot supply a CONUS-wide blend and has no loader.)
+not_implemented: []          # members in WPC's list that have no loader here yet
 
 profiles:
   lite:                      # quick, smaller run (good for free GitHub runners / testing)
