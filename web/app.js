@@ -83,6 +83,15 @@
     if (lab.length) box.textContent = 'Not available this run (too few members with complete data): ' + lab.join('; ') + '.';
   }
 
+  /* Optional run diagnostics (calibration.txt, written by the pipeline): shown in a collapsed panel under the member table. */
+  function loadCalibration() {
+    if (!manifest.calibration) return;
+    fetch(DATA + manifest.calibration + '?v=' + encodeURIComponent(manifest.generated))
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(function (t) { $('calibText').textContent = t; $('calib').hidden = false; })
+      .catch(function () { /* diagnostics are optional */ });
+  }
+
   function hasIce() { return manifest.windows.some(function (w) { return !!w.ice_file; }); }
 
   /* Load (and cache, newest 3) the decoded parameters of window w for the active hazard: a gzip .bin layer (see
@@ -496,6 +505,7 @@
     map = L.map('map', { zoomSnap: 0.25, minZoom: 3, maxZoom: 12 }).fitBounds(m.bounds);
     setupBasemap();
     buildMembers(); skipNote();
+    loadCalibration();
     buildControls();
     syncShade();
     window.__pwpfMap = map;                                   // handle for debugging and browser tests

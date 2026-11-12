@@ -82,3 +82,6 @@ th:first-child, td:first-child { text-align: left; white-space: nowrap; }
   .members { order: 3; }
   header { padding: 14px 16px; }
 }
+
+#calib summary { cursor: pointer; padding: 6px 0; }
+pre.calib { overflow-x: auto; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 10px 12px; white-space: pre; }
