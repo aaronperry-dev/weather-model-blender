@@ -321,6 +321,13 @@ class _FakeClient:
         Path(req["target"]).write_bytes(b"GRIB")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_ifs_state(monkeypatch):
+    from pwpf_blender.sources.noaa_sources import IfsSource
+    monkeypatch.setattr(IfsSource, "_fails", {})
+    monkeypatch.setattr(IfsSource, "_t_first", None)
+
+
 def _ifs(monkeypatch, tmp_path, plan):
     pytest.importorskip("ecmwf.opendata")
     import ecmwf.opendata as eo
@@ -335,7 +342,7 @@ def test_ifs_client_retries_are_capped(tmp_path, monkeypatch):
     src = _ifs(monkeypatch, tmp_path, {})
     src._retrieve(datetime(2026, 1, 15, 0), [6, 12], 3, "sfc")
     kw = _FakeClient.seen[0]
-    assert kw["maximum_retries"] == 4 and kw["retry_after"] == [10, 40, 2]        # library default is 500 x 120 s
+    assert kw["maximum_retries"] == 3 and kw["retry_after"] == [5, 20, 2]        # library default is 500 x 120 s
     assert any("ecmwf-forecasts" in k for k in nh._policies)
 
 
@@ -382,3 +389,22 @@ def test_session_adapter_paces_counts_and_penalises(server, monkeypatch):
     assert ft.t - 100.0 >= 0.5 + nh.THROTTLE_PENALTY_S - 1                        # third request waited out the penalty
     rep = nh.STATS.report()
     assert "3 requests" in rep and "1 throttled" in rep
+
+
+def test_failed_mirror_is_demoted_for_the_rest_of_the_run(tmp_path, monkeypatch):
+    from datetime import datetime
+    src = _ifs(monkeypatch, tmp_path, {"aws": "503 Service Unavailable"})
+    src._retrieve(datetime(2026, 1, 15, 0), [6], 3, "sfc")
+    src._retrieve(datetime(2026, 1, 15, 0), [6], 4, "sfc")
+    assert [k["source"] for k in _FakeClient.seen] == ["aws", "google", "google"]        # 2nd member skips the bad mirror
+
+
+def test_ifs_time_budget_stops_further_downloads(tmp_path, monkeypatch):
+    from datetime import datetime
+    from pwpf_blender.sources.noaa_sources import IfsSource
+    src = _ifs(monkeypatch, tmp_path, {})
+    src._retrieve(datetime(2026, 1, 15, 0), [6], 3, "sfc")
+    monkeypatch.setattr(IfsSource, "BUDGET_S", 0.0)
+    time.sleep(0.01)
+    with pytest.raises(nh.FetchError, match="time budget"):
+        src._retrieve(datetime(2026, 1, 15, 0), [6], 4, "sfc")
