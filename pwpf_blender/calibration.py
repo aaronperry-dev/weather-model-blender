@@ -36,6 +36,15 @@ REFERENCE_POINTS = [
 ]
 
 
+def point_indices(lat, lon, points=None):
+    """[(name, nws_value, (row, col))] nearest grid cell of every reference point."""
+    out = []
+    for name, la, lo, ref in (points or REFERENCE_POINTS):
+        d = (lat - la) ** 2 + ((lon - lo) * np.cos(np.radians(la))) ** 2
+        out.append((name, ref, np.unravel_index(int(np.argmin(d)), d.shape)))
+    return out
+
+
 def _window_bins(wid: str, bin_h: int):
     m = re.fullmatch(r"s(\d+)_f(\d+)", wid)
     if not m:
@@ -44,7 +53,7 @@ def _window_bins(wid: str, bin_h: int):
     return (end - length) // bin_h, end // bin_h
 
 
-def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None = None) -> str:
+def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None = None, ptdiag=None) -> str:
     """Text report; never raises (a diagnostics problem must not fail a run)."""
     cfg = cfg or {}
     box = cfg.get("box") or BOX
@@ -56,10 +65,7 @@ def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None =
     rr, cc = np.where(mask)
     r0, r1, c0, c1 = rr.min(), rr.max() + 1, cc.min(), cc.max() + 1
     bm = mask[r0:r1, c0:c1]
-    idx_pts = []
-    for name, la, lo, ref in points:
-        d = (lat - la) ** 2 + ((lon - lo) * np.cos(np.radians(la))) ** 2
-        idx_pts.append((name, ref, np.unravel_index(int(np.argmin(d)), d.shape)))
+    idx_pts = point_indices(lat, lon, points)
     out = ["", "=== calibration report (blended mode vs models vs NWS) ==="]
     for wid in wanted:
         kk = _window_bins(wid, bin_h)
@@ -102,6 +108,8 @@ def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None =
                 gv = "".join(f"{float(pt[groups[g], q].mean()):>10.2f}" for g in gnames)
                 out.append(f"      {name:<16}{ref:>5.2f}{float(fit['mode'][pr, pc]):>7.2f}{float(p50[pr, pc]):>7.2f}"
                            f"{float(pt[:, q].mean()):>9.2f}  {gv}")
+            if ptdiag is not None:
+                out.extend(_decomposition(ptdiag, runs, members, groups, idx_pts, k0, k1))
             ratios = [float(fit["mode"][pr, pc]) / ref for _, ref, (pr, pc) in idx_pts if ref >= 0.5]
             if ratios:
                 out.append(f"   mode / NWS at the {len(ratios)} points with >= 0.5 in:  median {np.median(ratios):.1f}x  "
@@ -109,10 +117,30 @@ def report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None =
     return "\n".join(out)
 
 
-def log_report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None = None) -> None:
+def _decomposition(ptdiag, runs, members, groups, idx_pts, k0, k1):
+    """snow = QPF x (share of the liquid that fell as snow) x SLR, per model group, averaged over the reference points
+    where NWS shows at least 0.5 in.  ptdiag[i, k] = (QPF in, potential snow in = QPF x SLR, snow in) at every point."""
+    sel = [q for q, (_, ref, _) in enumerate(idx_pts) if ref >= 0.5]
+    if not sel:
+        return []
+    out = ["   what makes the snow, per group, mean over the points with NWS >= 0.5 in  (snow = QPF x snow share x SLR):",
+           f"      {'group':<14}{'QPF in':>8}{'snow share':>12}{'SLR':>7}{'snow in':>9}{'NWS in':>8}"]
+    nws = float(np.mean([idx_pts[q][1] for q in sel]))
+    allj = list(range(len(members)))
+    for g, js in [("ALL MEMBERS", allj)] + sorted(groups.items()):
+        ii = [members[j] for j in js]
+        d = ptdiag[ii][:, k0:k1].sum(axis=1)[:, :, sel]             # (members, 3, points): window sums
+        qpf, pot, snow = (float(d[:, c].mean()) for c in range(3))
+        if qpf <= 0:
+            continue
+        out.append(f"      {g[:13]:<14}{qpf:>8.2f}{(snow / pot if pot > 0 else 0):>12.2f}{(pot / qpf if qpf > 0 else 0):>7.1f}{snow:>9.2f}{nws:>8.2f}")
+    return out
+
+
+def log_report(res, runs, avail, snow_bins, lon, lat, bin_h: int, cfg: dict | None = None, ptdiag=None) -> None:
     if (cfg or {}).get("enabled", True) is False:
         return
     try:
-        log.info("%s", report(res, runs, avail, snow_bins, lon, lat, bin_h, cfg))
+        log.info("%s", report(res, runs, avail, snow_bins, lon, lat, bin_h, cfg, ptdiag))
     except Exception as e:                                                   # noqa: BLE001
         log.warning("calibration report failed: %s", e)

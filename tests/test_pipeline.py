@@ -365,5 +365,6 @@ def test_calibration_report_runs_on_a_synthetic_cycle(caplog):
     txt = "\n".join(r.getMessage() for r in caplog.records)
     assert "calibration report" in txt and "[s72_f072]" in txt and "BLEND (mode)" in txt
     assert "Hunter NY" in txt and "mode / NWS" in txt
+    assert "what makes the snow" in txt and "ALL MEMBERS" in txt            # QPF x snow share x SLR per group
     assert "calibration report failed" not in txt
     assert calibration._window_bins("s24_f030", 6) == (1, 5) and calibration._window_bins("x", 6) is None
