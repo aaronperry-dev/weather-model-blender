@@ -83,7 +83,18 @@ text, so there is no cfgrib/eccodes short-name guessing. AWS Open Data is tried 
 
 RRFS `prslev` files are ~550 MB each, which is why byte-range subsetting matters: a step downloads a few tens of MB.
 
-### Respecting server limits
+### Missing data
+
+Members that are late, missing or fail part-way never abort the run.  Every period (e.g. `s24_f042`) is
+blended from the members that delivered *all* of its 6-h bins, with weights renormalised, so a member that only
+reaches +36 h still counts for the earlier periods.  A member is retried per bin and given up on after
+`member_failure_limit` consecutive failures (saves request budget).  Periods with fewer than `min_members` complete
+members are skipped (listed under `windows_skipped` in `manifest.json` and shown in the viewer); periods with fewer
+than `warn_members` are flagged "reduced ensemble".  The run only fails if no member delivers anything or no period
+can be produced.  The viewer's table under the map lists every member, its model run, which 6-h bins arrived and
+the first error, so failures are visible without reading the CI log.
+
+## Respecting server limits
 
 All HTTP goes through one polite client (`noaa_http._request`), so no server's rate or download limit is approached:
 
@@ -122,7 +133,7 @@ layouts were checked against the AWS/NOMADS directory listings and NCO inventori
 could not reach NOAA, so a full live run has only ever happened on GitHub's runners. Everything downstream (wet-bulb snow level, ptype, SLR,
 downscaling, binormal fit, export, viewer) is covered by tests on a synthetic ensemble. Start with `--profile lite` and
 read the `diagnose` output and Actions log; a member that fails is dropped with a warning that carries the reason, and
-the run aborts below `min_members`.
+a period with fewer than `min_members` complete members is skipped (see "Missing data").
 
 ### PRISM normals
 
@@ -192,3 +203,6 @@ publishes them). Basemap © OpenStreetMap contributors © CARTO.
 ## Roadmap
 CMC GEPS/RDPS and SREF loaders · NBM SLR / snow-level percentiles as optional inputs · ice (freezing-rain) products
 using the simplified FRAM ILR · per-pixel NaN handling at CAM domain edges · automatic WPC-file download in `validate`.
+
+
+*Colours:* snowfall amounts use the NWS "Expected Snowfall" ramp; probabilities use ColorBrewer YlGnBu; basemaps are keyless (Esri light gray by default, OSM / USGS Topo selectable, with automatic fallback).
