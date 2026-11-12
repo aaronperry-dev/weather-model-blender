@@ -53,15 +53,24 @@ jobs:
         continue-on-error: true            # informational: prints which feeds answer and what fields they hold
         run: python -m pwpf_blender diagnose --download
 
-      - name: Restore static inputs (terrain + PRISM normals)
-        id: static
+      # terrain and PRISM are cached separately so that a failed PRISM download is retried on the next run
+      # instead of being frozen into a terrain-only cache entry
+      - name: Restore terrain
+        id: static_terrain
         uses: actions/cache@v4
         with:
-          path: static
-          key: static-v1
+          path: static/terrain_2p5km.npy
+          key: static-terrain-v1
+
+      - name: Restore PRISM normals
+        id: static_prism
+        uses: actions/cache@v4
+        with:
+          path: static/prism_ppt_monthly_2p5km.npy
+          key: static-prism-v2
 
       - name: Prepare static inputs
-        if: env.PROFILE != 'synthetic' && steps.static.outputs.cache-hit != 'true'
+        if: env.PROFILE != 'synthetic' && (steps.static_terrain.outputs.cache-hit != 'true' || steps.static_prism.outputs.cache-hit != 'true')
         run: python -m pwpf_blender prepare-static --out static
 
       - name: Run pipeline
