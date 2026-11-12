@@ -61,7 +61,7 @@ PYTHONPATH=. python scripts/preview.py site/fields_*.npz preview.png s24_f024   
    (fine on current 16 GB hosted runners).
    Set the repository variable `PWPF_PROFILE` to choose what the twice-daily schedule runs (default `lite`).
 
-The workflow restores/creates `static/` (RTMA terrain + PRISM normals, cached), runs the pipeline, uploads the
+The workflow restores/creates `static/` (RTMA terrain + PRISM normals, cached separately), runs the pipeline, uploads the
 site to Pages and keeps the full-precision `fields_*.npz` as a 3-day artifact for validation.
 
 ### Where the data comes from
@@ -104,8 +104,19 @@ downscaling, binormal fit, export, viewer) is covered by tests on a synthetic en
 read the `diagnose` output and Actions log; a member that fails is dropped with a warning that carries the reason, and
 the run aborts below `min_members`.
 
-PRISM changed its web services in Oct 2025; if the default URL fails, download the 12 monthly 4 km `ppt` normals
-from <https://prism.oregonstate.edu/normals/> and run `python -m pwpf_blender prepare-static --prism-dir <folder>`.
+### PRISM normals
+
+PRISM retired its BIL files and old web service on 2025-10-01 (everything is now Cloud Optimized GeoTIFF), and its new
+web service does **not** serve the 30-year normals - those come from PRISM's FTP tree, browsable over HTTPS. `prepare-static`
+therefore reads the directory listing at `https://data.prism.oregonstate.edu/normals/us/4km/ppt/`, picks the twelve
+monthly grids by file name (GeoTIFF preferred, zipped BIL also understood) and checks that each download really is a
+zip/TIFF. If the names don't look like twelve months it prints the listing it saw.
+
+PRISM is **not fatal**: if it can't be fetched the build continues without QPF downscaling, a GitHub Actions warning is
+raised, and the site's notice says "PRISM QPF downscaling was not applied". The workflow caches terrain and PRISM
+separately so a failed PRISM download is retried on the next run. To supply the data yourself, download the twelve
+monthly 4 km `ppt` normals from <https://prism.oregonstate.edu/normals/> into a folder and run
+`python -m pwpf_blender prepare-static --prism-dir <folder>` (add `--require-prism` to fail instead of continue).
 
 ## Getting "very close" to the real PWPF — the calibration loop
 
