@@ -19,7 +19,7 @@ From WPC's "About PWPF Products" page and the 2.5 km file README:
 
 | PWPF step (public documentation) | Here | Status |
 |---|---|---|
-| ~60 member multi-model ensemble: 10 GEFS (06Z), 25 ECMWF ENS (00Z), 10 CMC ENS, SREF NMMB, 2 HRRR, 2 CMC RDPS, 2 NAM-nest, 4 HiResW ARW, FV3-LAM, GFS, ECMWF HRES, GEFS mean | `config/pwpf.yaml` groups with the same init-time logic (`age_h`, `lags_h`), seeded random member picks, and PWPF-style fall-back to time-lagged GFS/GEFS beyond a CAM's range | **Implemented** except CMC GEPS/RDPS and SREF (no loader yet) |
+| ~60 member multi-model ensemble: 10 GEFS, 25 ECMWF ENS, 10 CMC ENS, 2 HRRR, 2 CMC RDPS, GFS, ECMWF HRES, GEFS mean, plus (until Nov 2026) SREF, 2 NAM-nest, 4 HiResW ARW, FV3-LAM | `config/pwpf.yaml` groups with the same init-time logic (`age_h`, `lags_h`), seeded random member picks, and PWPF-style fall-back to time-lagged GFS/GEFS beyond a CAM's range. **NAM, NAM-nest, HiResW, HREF and SREF were retired on 2026-11-03** (NWS SCN 26-47/48); their CAM role is filled by **RRFS** (deterministic + 5-member ensemble, 3 km) and HRRR, the members NCEP itself combines into REFS | **Implemented** except CMC GEPS/RDPS (no loader yet). WPC hasn't published its post-transition constituent list, so the CAM part is the closest public analogue |
 | PRISM-based QPF downscaling of every member | `downscale.py`: ratio of PRISM monthly normals to the same field smoothed to the member's resolution | **Implemented** (ratio clip limits are our assumption) |
 | Snow level = height of the 0.5 °C wet-bulb surface, top-down search, intersected with RTMA terrain; terrain above it ⇒ snow | `thermo.py` (Stull wet-bulb, top-down crossing) + RTMA 2.5 km terrain | **Implemented** |
 | Precip type: NCEP models use dominant-type (Manikin 2005); non-NCEP use a simple decision tree on T2m and T925/850/700 | `ptype.py`: dominant type from native categorical fields; decision tree otherwise | **Implemented** (tree thresholds / tie order are our assumptions) |
@@ -37,7 +37,7 @@ So the *distributional machinery* follows the documentation closely; the pieces 
 
 ```bash
 pip install -r requirements.txt pytest
-pytest -q                                              # 34 tests incl. Python↔JavaScript parity
+pytest -q                                              # tests incl. Python↔JavaScript parity and the download layer
 python -m pwpf_blender run --synthetic --out site/data --save-npz
 cp web/* site/ && python -m http.server -d site 8000   # open http://localhost:8000
 PYTHONPATH=. python scripts/preview.py site/fields_*.npz preview.png d1   # needs matplotlib
@@ -53,15 +53,45 @@ PYTHONPATH=. python scripts/preview.py site/fields_*.npz preview.png d1   # need
 The workflow restores/creates `static/` (RTMA terrain + PRISM normals, cached), runs the pipeline, uploads the
 site to Pages and keeps the full-precision `fields_*.npz` as a 3-day artifact for validation.
 
-### Live-data caveat (read this)
+### Where the data comes from
 
-The loaders in `pwpf_blender/sources/herbie_sources.py` (GEFS, GFS, HRRR, NAM nest, HiResW via
-[Herbie](https://github.com/blaylockbk/Herbie); ECMWF open data via `ecmwf-opendata`) and
-`static_data.py` (RTMA terrain, PRISM download) were written from the feed documentation but **could not be run against the
-live servers in the environment where this repo was authored** (outbound access was blocked). Everything downstream
-of them — wet-bulb snow level, ptype, SLR, downscaling, binormal fit, export, viewer — is covered by tests on a
-synthetic ensemble. Expect to adjust a variable name or regex on first contact; start with `--profile lite`
-and look at the Actions log (a member that fails is dropped with a warning, the run aborts below `min_members`).
+All NOAA feeds are read **directly** over HTTPS - no wrapper library. For each GRIB2 file the loader fetches
+`<url>.idx` (a text inventory), selects the records it needs by matching `VAR:LEVEL:FCST`, downloads only those byte
+ranges and decodes them with eccodes (`pwpf_blender/noaa_http.py`). Records are identified by NOAA's own inventory
+text, so there is no cfgrib/eccodes short-name guessing. AWS Open Data is tried first, NOMADS second:
+
+| Loader | Source | Files |
+|---|---|---|
+| `gefs` | `noaa-gefs-pds` | `gefs.YYYYMMDD/HH/atmos/pgrb2ap5/{gep01..30,geavg}.tHHz.pgrb2a.0p50.fFFF` |
+| `gfs` | `noaa-gfs-bdp-pds` | `gfs.YYYYMMDD/HH/atmos/gfs.tHHz.pgrb2.0p25.fFFF` |
+| `hrrr` | `noaa-hrrr-bdp-pds` | `hrrr.YYYYMMDD/conus/hrrr.tHHz.wrf{sfc,prs}fFF.grib2` |
+| `rrfs` | `noaa-rrfs-ops-pds` / NOMADS `rrfs/prod` | `rrfs.YYYYMMDD/HH/rrfs.tHHz.{2dfld,prslev}.3km.fFFF.conus.grib2` |
+| `rrfs_ens` | same | `rrfsens.YYYYMMDD/HH/mNNN/rrfs.tHHz.mNNN.{2dfldnomads,prslevnomads}.3km.fFFF.conus.grib2` |
+| `ifs_ens`, `ifs_hres` | ECMWF open data (`ecmwf-opendata`, default AWS mirror) | decoded with eccodes |
+| terrain | RTMA 2.5 km `rtma2p5.tHHz.2dvaranl_ndfd.grb2_wexp` (fallback: RRFS `HGT:surface`) | `prepare-static` |
+
+RRFS `prslev` files are ~550 MB each, which is why byte-range subsetting matters: a step downloads a few tens of MB.
+
+### Diagnosing a feed
+
+```bash
+python -m pwpf_blender diagnose --download      # per model: newest cycle, which URL answered, which records match,
+                                                # and one real f006 read (grid, value ranges)
+python -m pwpf_blender diagnose --only rrfs terrain
+```
+
+The workflow runs this before the pipeline (informational), so the Actions log always shows the real state of every
+feed. Errors name the URL and HTTP status; when an inventory is readable but lacks a field, the first inventory
+records are printed.
+
+### Live-data caveat
+
+The live loaders are unit-tested against real GRIB2 messages served by a local byte-range HTTP server, and their URL
+layouts were checked against the AWS/NOMADS directory listings and NCO inventories, but the authoring environment
+could not reach NOAA, so a full live run has only ever happened on GitHub's runners. Everything downstream (wet-bulb snow level, ptype, SLR,
+downscaling, binormal fit, export, viewer) is covered by tests on a synthetic ensemble. Start with `--profile lite` and
+read the `diagnose` output and Actions log; a member that fails is dropped with a warning that carries the reason, and
+the run aborts below `min_members`.
 
 PRISM changed its web services in Oct 2025; if the default URL fails, download the 12 monthly 4 km `ppt` normals
 from <https://prism.oregonstate.edu/normals/> and run `python -m pwpf_blender prepare-static --prism-dir <folder>`.

@@ -79,6 +79,11 @@ def cmd_prepare(a):
     print("static ready:", t, p)
 
 
+def cmd_diagnose(a):
+    from .diagnose import run
+    sys.exit(run(download=a.download, only=a.only))
+
+
 def cmd_validate(a):
     from . import validate
     cycle = datetime.fromisoformat(a.cycle).replace(tzinfo=None)
@@ -130,6 +135,10 @@ def main(argv=None):
     s.add_argument("--prism-url", default=None)
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_prepare)
+    d = sub.add_parser("diagnose", help="check every live data feed (AWS/NOMADS inventories) and print the result")
+    d.add_argument("--download", action="store_true", help="also read one real forecast step per model")
+    d.add_argument("--only", nargs="*", default=None, help="models to check (gefs gfs hrrr rrfs rrfs_ens terrain)")
+    d.set_defaults(fn=cmd_diagnose)
     v = sub.add_parser("validate", help="compare with WPC's published PWPF GRIB2 files")
     v.add_argument("--ours", required=True, help="fields_*.npz from `run --save-npz`")
     v.add_argument("--wpc-dir", required=True)

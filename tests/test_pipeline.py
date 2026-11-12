@@ -109,8 +109,8 @@ def test_default_member_list_matches_pwpf_documentation_counts():
     by = {}
     for r in runs:
         by[r.group] = by.get(r.group, 0) + 1
-    assert by["gefs"] == 10 and by["ifs_ens"] == 25 and by["hrrr"] == 2 and by["nam_nest"] == 2
-    assert by["hiresw_arw"] == 4 and by["gefs_mean"] == 1 and by["gfs"] == 1 and by["ifs_hres"] == 1
+    assert by["gefs"] == 10 and by["ifs_ens"] == 25 and by["hrrr"] == 2 and by["rrfs"] == 2
+    assert by["rrfs_ens"] == 10 and by["gefs_mean"] == 1 and by["gfs"] == 1 and by["ifs_hres"] == 1
     gefs_inits = {r.init for r in runs if r.group == "gefs"}
     assert gefs_inits == {datetime(2026, 1, 15, 6)}
     assert {r.init for r in runs if r.group == "hrrr"} == {datetime(2026, 1, 15, 12), datetime(2026, 1, 15, 6)}
@@ -175,5 +175,5 @@ def test_encode_decode_precision():
 def test_lite_profile_reduces_members_and_stride():
     cfg = load_config(CFG, "lite")
     names = {m["name"]: m for m in cfg["members"]}
-    assert names["ifs_ens"]["count"] == 10 and "nam_nest" not in names and "hiresw_arw" not in names
+    assert names["ifs_ens"]["count"] == 10 and "rrfs_ens" not in names and "rrfs" in names
     assert cfg["grid"]["stride"] == 2 and cfg["mode"]["method"] == "pmm"

@@ -11,10 +11,9 @@ def make_source(loader: str, **kw):
     if loader == "synthetic_cam":
         from .synthetic import SyntheticSource
         return SyntheticSource("cam", **kw)
-    from . import herbie_sources as hs
+    from . import noaa_sources as hs
     table = {
-        "gefs": hs.gefs, "gfs": hs.gfs, "hrrr": hs.hrrr, "nam_nest": hs.nam_nest,
-        "hiresw_arw": hs.hiresw_arw, "hiresw_fv3": hs.hiresw_fv3,
+        "gefs": hs.gefs, "gfs": hs.gfs, "hrrr": hs.hrrr, "rrfs": hs.rrfs, "rrfs_ens": hs.rrfs_ens,
         "ifs_ens": lambda: hs.IfsSource("ifs_ens", ensemble=True),
         "ifs_hres": lambda: hs.IfsSource("ifs_hres", ensemble=False),
     }

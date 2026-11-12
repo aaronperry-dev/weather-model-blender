@@ -2,7 +2,7 @@ name: Build PWPF-style snowfall guidance
 
 on:
   schedule:
-    # ~3h50m after the 00Z / 12Z cycles, once HRRR/NAM/HiResW/GFS 00Z/12Z and ECMWF 00Z open data are out
+    # ~3h50m after the 00Z / 12Z cycles, once HRRR/RRFS/GFS 00Z/12Z and ECMWF 00Z open data are out
     - cron: "50 3,15 * * *"
   workflow_dispatch:
     inputs:
@@ -47,6 +47,11 @@ jobs:
 
       - name: Unit tests
         run: pip install pytest && python -m pytest -q
+
+      - name: Data feed diagnostics (AWS/NOMADS)
+        if: env.PROFILE != 'synthetic'
+        continue-on-error: true            # informational: prints which feeds answer and what fields they hold
+        run: python -m pwpf_blender diagnose --download
 
       - name: Restore static inputs (terrain + PRISM normals)
         id: static

@@ -1,8 +1,8 @@
 # live data access (not needed for --synthetic runs or the unit tests)
-xarray
-pandas
-cfgrib
+# NOAA feeds are read with plain HTTPS + .idx byte ranges and decoded with eccodes (no Herbie).
 eccodes
-herbie-data
-ecmwf-opendata
 requests
+ecmwf-opendata
+# only for `validate` / external WPC grids (reads user-supplied GRIB2 with cfgrib)
+xarray
+cfgrib

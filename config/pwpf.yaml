@@ -1,8 +1,11 @@
 # PWPF-style snowfall blender configuration.
-# Member groups mirror the constituent list in WPC's "About PWPF Products" page:
-#   10 GEFS (06Z) | 25 ECMWF ENS (00Z) | 10 CMC ENS (00Z) | SREF NMMB | 2 HRRR | 2 CMC RDPS |
-#   2 NAM 3km nest | 4 HiResW WRF-ARW | HiResW FV3-LAM | GFS | ECMWF HRES | GEFS mean | WPC forecast
-# Groups not yet implemented as loaders (CMC GEPS/RDPS, SREF) are listed under `not_implemented`.
+# Member groups follow the constituent list in WPC's "About PWPF Products" page, updated for the 2026-11-03
+# retirement of NAM / NAM-nest / HiResW / HREF / SREF (NWS SCN 26-47, 26-48), whose CAM role is now played by
+# RRFS (deterministic + 5-member ensemble, 3 km) and HRRR - the same members NCEP combines into REFS
+# (current + 6 h-old cycle of RRFS det and ens, plus 2 HRRR).  WPC has not published its post-transition
+# constituent list, so treat the CAM part as the best public analogue.
+#   10 GEFS | 25 ECMWF ENS | GFS | ECMWF HRES | GEFS mean | 2 HRRR | 2 RRFS det | 10 RRFS ens | (WPC forecast)
+# Groups not yet implemented as loaders (CMC GEPS/RDPS) are listed under `not_implemented`.
 
 grid:
   stride: 1                  # 1 = full 2.5 km NDFD grid, 2 = 5 km, 4 = 10 km (fast previews)
@@ -66,20 +69,18 @@ members:
   - {name: gfs,       loader: gfs,        members: [null],                   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 384, weight: 1}
   - {name: ifs_hres,  loader: ifs_hres,   members: [null],                   run_hours: [0,12],      age_h: 12, max_fxx_h: 144, weight: 1}
   - {name: hrrr,      loader: hrrr,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 36,  fallback: gfs, weight: 1}
-  - {name: nam_nest,  loader: nam_nest,   members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 60,  fallback: gfs, weight: 1}
-  - {name: hiresw_arw, loader: hiresw_arw, members: [1, 2], lags_h: [0, 12], run_hours: [0,12],      age_h: 0,  max_fxx_h: 48,  fallback: gefs, weight: 1}
-  - {name: hiresw_fv3, loader: hiresw_fv3, members: [null],                  run_hours: [0,12],      age_h: 0,  max_fxx_h: 48,  fallback: gfs, weight: 1}
+  - {name: rrfs,      loader: rrfs,       members: [null], lags_h: [0, 6],   run_hours: [0,6,12,18], age_h: 0,  max_fxx_h: 84,  fallback: gfs, weight: 1}
+  - {name: rrfs_ens,  loader: rrfs_ens,   members: [1,2,3,4,5], lags_h: [0, 6], run_hours: [0,6,12,18], age_h: 0, max_fxx_h: 60,  fallback: gefs, weight: 1}
 
 not_implemented:             # in WPC's list, no loader here yet (contributions welcome)
   - CMC GEPS (10 perturbed members, 00Z)
   - CMC RDPS (00Z, 06Z)
-  - SREF NMMB member (09Z)
 
 profiles:
   lite:                      # quick, smaller run (good for free GitHub runners / testing)
     grid: {stride: 2}
     member_counts: {ifs_ens: 10}
-    disable: [hiresw_arw, hiresw_fv3, nam_nest]
+    disable: [rrfs_ens]        # 10 extra 3 km members; enable on a bigger runner / with the `full` profile
   synthetic:                 # no network; exercises the whole pipeline
     grid: {stride: 4}
     members_replace:
