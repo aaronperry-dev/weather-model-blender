@@ -1,0 +1,91 @@
+name: Build PWPF-style snowfall guidance
+
+on:
+  schedule:
+    # ~3h50m after the 00Z / 12Z cycles, once HRRR/NAM/HiResW/GFS 00Z/12Z and ECMWF 00Z open data are out
+    - cron: "50 3,15 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Profile: lite | full | synthetic (no-network demo). Empty = repo variable PWPF_PROFILE or lite"
+        required: false
+        default: ""
+      cycle:
+        description: "Cycle (ISO UTC, e.g. 2026-01-15T12) or 'auto'"
+        required: false
+        default: "auto"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      # dispatch input > repo variable PWPF_PROFILE > 'lite'.  Use 'full' for the complete ~60-member run.
+      PROFILE: ${{ inputs.profile || vars.PWPF_PROFILE || 'lite' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ "$PROFILE" != "synthetic" ]; then pip install -r requirements-live.txt; fi
+
+      - name: Unit tests
+        run: pip install pytest && pytest -q
+
+      - name: Restore static inputs (terrain + PRISM normals)
+        id: static
+        uses: actions/cache@v4
+        with:
+          path: static
+          key: static-v1
+
+      - name: Prepare static inputs
+        if: env.PROFILE != 'synthetic' && steps.static.outputs.cache-hit != 'true'
+        run: python -m pwpf_blender prepare-static --out static
+
+      - name: Run pipeline
+        run: |
+          ARGS="--cycle ${{ inputs.cycle || 'auto' }} --out site/data --save-npz"
+          if [ "$PROFILE" = "synthetic" ]; then ARGS="$ARGS --synthetic"
+          elif [ "$PROFILE" != "full" ]; then ARGS="$ARGS --profile $PROFILE"; fi
+          python -m pwpf_blender run $ARGS
+
+      - name: Assemble site
+        run: cp web/* site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fields-npz
+          path: site/fields_*.npz
+          if-no-files-found: ignore
+          retention-days: 3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

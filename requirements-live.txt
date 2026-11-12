@@ -1,0 +1,8 @@
+# live data access (not needed for --synthetic runs or the unit tests)
+xarray
+pandas
+cfgrib
+eccodes
+herbie-data
+ecmwf-opendata
+requests

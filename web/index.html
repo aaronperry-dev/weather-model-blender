@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Probabilistic Snowfall Guidance (unofficial PWPF-style)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Probabilistic Snowfall Guidance <span class="tag">unofficial · PWPF-style</span></h1>
+    <div id="runinfo">loading…</div>
+  </div>
+</header>
+
+<main>
+  <div id="map"></div>
+
+  <aside id="panel">
+    <section>
+      <h2>Period</h2>
+      <div id="windows" class="chips"></div>
+      <div id="validity" class="muted"></div>
+    </section>
+
+    <section>
+      <h2>Product</h2>
+      <div class="chips" id="products">
+        <button data-kind="prob" class="on">Probability ≥</button>
+        <button data-kind="pct">Percentile</button>
+        <button data-kind="mode">Forecast (mode)</button>
+      </div>
+      <label id="thrRow">Snowfall at least
+        <select id="thr"></select> inches</label>
+      <label id="pctRow" hidden>Percentile
+        <select id="pct"></select></label>
+      <label>Overlay opacity <input id="opacity" type="range" min="0.2" max="1" step="0.05" value="0.85"></label>
+    </section>
+
+    <section id="readout">
+      <h2>Point forecast</h2>
+      <div class="muted">Move the pointer over the map (or tap).</div>
+    </section>
+
+    <section>
+      <h2>Legend</h2>
+      <div id="legend"></div>
+    </section>
+
+    <section class="muted small" id="about"></section>
+  </aside>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="binormal.js"></script>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
