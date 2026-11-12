@@ -100,7 +100,7 @@ jobs:
           python -m pwpf_blender run $ARGS
 
       - name: Assemble site
-        run: cp web/* site/
+        run: cp -r web/. site/          # includes web/borders/
 
       - uses: actions/upload-pages-artifact@v3
         with:
