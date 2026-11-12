@@ -156,12 +156,23 @@ class NoaaSource(Source):
         self._acc: dict = {}             # (init, fxx, member) -> {(a, b): array}; small FIFO
 
     def available(self, init, fxx, member) -> bool:
-        """Inventory (.idx) of every file for this hour exists on a mirror (the idx is written after the GRIB)."""
-        try:
-            for p in self.plan(init, fxx, member):
-                nh.get_inventory_first(p.urls)
-        except nh.FetchError:
-            return False
+        """Inventory (.idx) of every file for this hour exists on a mirror (the idx is written after the GRIB).
+        Only a definite "not there" (HTTP 403/404 from every mirror; NOMADS answers 403 for a run that has no
+        directory yet) says no.  A timeout or a throttled host proves nothing, and a whole run must not be dropped
+        because of it, so that case counts as available and real failures get reported member by member."""
+        for p in self.plan(init, fxx, member):
+            unknown = False
+            for u in p.urls:
+                try:
+                    nh.get_inventory(u, probe=True)
+                    break
+                except nh.HttpStatusError as e:
+                    unknown = unknown or e.status not in (403, 404)
+                except nh.FetchError:
+                    unknown = True
+            else:
+                if not unknown:
+                    return False
         return True
 
     # ------------------------------------------------------------------ IO
@@ -454,6 +465,8 @@ class IfsSource(Source):
                         cls._index_cache[url] = body
                 resp = requests.Response()
                 resp.status_code, resp.url, resp._content = 200, url, body
+                resp._content_consumed = True                       # else iter_lines()/iter_content() read the (absent) raw stream
+                resp.encoding = "utf-8"
                 return resp
 
         client.session.get = get
