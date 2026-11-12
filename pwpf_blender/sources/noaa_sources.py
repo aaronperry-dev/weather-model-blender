@@ -22,6 +22,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -314,6 +315,12 @@ class IfsSource(Source):
     src_dx_km = 28.0
     native_ptype = False
     MIRRORS = ("aws", "google", "azure", "ecmwf")          # tried in this order after the configured primary
+    # Mirror health is shared by every IFS source in the process: a mirror that exhausted its retries is tried last
+    # from then on, so one throttled mirror costs one download's worth of waiting, not one per member.
+    _fails: dict = {}
+    _health_lock = threading.Lock()
+    _t_first: float | None = None                          # wall clock of the first download, for the time budget
+    BUDGET_S = float(os.environ.get("PWPF_IFS_BUDGET_MIN", "45")) * 60.0
 
     def __init__(self, name: str, ensemble: bool, source: str | None = None, save_dir=None):
         self.name, self.ensemble = name, ensemble
@@ -363,7 +370,15 @@ class IfsSource(Source):
             hosts = {"aws": "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/",
                      "azure": "https://ecmwf.blob.core.windows.net/",
                      "google": "https://storage.googleapis.com/", "ecmwf": "https://data.ecmwf.int/"}
-            chain = [self.source] + [m for m in self.MIRRORS if m != self.source]
+            with IfsSource._health_lock:
+                if IfsSource._t_first is None:
+                    IfsSource._t_first = time.monotonic()
+                spent = time.monotonic() - IfsSource._t_first
+                order = [self.source] + [m for m in self.MIRRORS if m != self.source]
+                chain = sorted(order, key=lambda m: (IfsSource._fails.get(m, 0), order.index(m)))
+            if spent > self.BUDGET_S:
+                raise nh.FetchError(f"ECMWF open data: time budget of {self.BUDGET_S / 60:.0f} min for IFS downloads is used "
+                                    f"up ({spent / 60:.0f} min); skipping the rest (PWPF_IFS_BUDGET_MIN changes it)")
             errors = []
             for mirror in chain:
                 try:
@@ -371,9 +386,11 @@ class IfsSource(Source):
                     # once), i.e. far more requests than files; mount_polite paces and counts every one of them.
                     # Library default is 500 retries x 120 s: keep it short and move on to the next mirror instead.
                     with nh.polite(hosts.get(mirror, hosts["ecmwf"]), cost=0):
-                        client = Client(source=mirror, maximum_retries=4, retry_after=[10, 40, 2])
+                        client = Client(source=mirror, maximum_retries=3, retry_after=[5, 20, 2])
                         nh.mount_polite(client.session)
                         client.retrieve(**req)
+                    with IfsSource._health_lock:
+                        IfsSource._fails[mirror] = 0
                     if errors:
                         log.warning("%s: %s mirror served the file after %s", self.name, mirror, "; ".join(errors))
                     return
@@ -384,6 +401,8 @@ class IfsSource(Source):
                             junk.unlink()                                  # never keep a truncated download
                     if "404" in str(e):                                    # not published yet: other mirrors won't have it
                         break
+                    with IfsSource._health_lock:
+                        IfsSource._fails[mirror] = IfsSource._fails.get(mirror, 0) + 1
             raise nh.FetchError(f"ECMWF open data request failed on every mirror ({' | '.join(errors)}); "
                                 f"request={ {k: v for k, v in req.items() if k != 'target'} }")
 
