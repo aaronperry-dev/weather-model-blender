@@ -80,6 +80,7 @@ class FilePlan:
     urls: tuple[str, ...]                # candidates, tried in order (AWS, then NOMADS)
     patterns: tuple[str, ...]
     has_apcp: bool = True
+    filt: tuple | None = None            # (grib-filter CGI url, dir, file): fetch by server-side subsetting
 
 
 def plan_gefs(init: datetime, fxx: int, member) -> list[FilePlan]:
@@ -89,6 +90,19 @@ def plan_gefs(init: datetime, fxx: int, member) -> list[FilePlan]:
     return [FilePlan((f"{S3.format(bucket='noaa-gefs-pds')}/gefs.{d}/{h}/atmos/pgrb2ap5/{name}",
                       f"{NOMADS}/gens/prod/gefs.{d}/{h}/atmos/pgrb2ap5/{name}"),
                      (PAT_LEVELS, PAT_SFC, PAT_2M))]
+
+
+CMCE_FILTER = "https://nomads.ncep.noaa.gov/cgi-bin/filter_cmcens.pl"
+
+
+def plan_cmce(init: datetime, fxx: int, member) -> list[FilePlan]:
+    """Canadian GEPS as redistributed by NCEP (NAEFS), 0.5 deg, 00/12Z, 3-hourly to f192.  NOMADS only; fetched
+    through the grib filter (1 request per step) rather than ~9 byte-range requests."""
+    d, h = f"{init:%Y%m%d}", f"{init:%H}"
+    who = "geavg" if member == "avg" else "gec00" if member in (0, "c00") else f"gep{int(member):02d}"
+    name = f"cmc_{who}.t{h}z.pgrb2a.0p50.f{fxx:03d}"
+    return [FilePlan((f"{NOMADS}/naefs/prod/cmce.{d}/{h}/pgrb2ap5/{name}",), (PAT_LEVELS, PAT_SFC, PAT_2M),
+                     filt=(CMCE_FILTER, f"/cmce.{d}/{h}/pgrb2ap5", name))]
 
 
 def plan_gfs(init: datetime, fxx: int, member) -> list[FilePlan]:
@@ -155,7 +169,17 @@ class NoaaSource(Source):
         for p in self.plan(init, fxx, member):
             if apcp_only and not p.has_apcp:
                 continue
-            f, grid, url = nh.fetch_fields(p.urls, (PAT_APCP,) if apcp_only else p.patterns, want_grid=True)
+            pats = (PAT_APCP,) if apcp_only else p.patterns
+            f = None
+            if p.filt is not None:
+                try:
+                    f, grid, url = nh.fetch_fields_filtered(p.urls[0], p.filt, pats, want_grid=True)
+                except nh.NoMatch:
+                    raise
+                except nh.FetchError as e:
+                    log.warning("%s f%03d: grib filter failed (%s); falling back to byte ranges", self.name, fxx, e)
+            if f is None:
+                f, grid, url = nh.fetch_fields(p.urls, pats, want_grid=True)
             log.debug("%s f%03d: %d fields from %s", self.name, fxx, len(f), url)
             self._set_grid(grid)
             fields.update({k: self._crop(v) for k, v in f.items()})
@@ -263,6 +287,10 @@ def gfs() -> NoaaSource:
 
 def hrrr() -> NoaaSource:
     return NoaaSource("hrrr", plan_hrrr, 3, 3.0)
+
+
+def cmce() -> NoaaSource:
+    return NoaaSource("cmce", plan_cmce, 3, 55.0, native_ptype=False)
 
 
 def rrfs() -> NoaaSource:
