@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import tempfile
 import threading
+import time
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +41,14 @@ Key = tuple[str, str, str]               # (VAR, LEVEL, FCST) exactly as in the 
 
 class FetchError(RuntimeError):
     """A download/decoding problem; the message always names the URL and the reason."""
+
+
+class HttpStatusError(FetchError):
+    """The server answered with a non-success HTTP status (the file was not served)."""
+
+    def __init__(self, msg: str, status: int):
+        super().__init__(msg)
+        self.status = status
 
 
 class NoMatch(FetchError):
@@ -115,6 +126,140 @@ def plan_ranges(records: list[Record], selected: list[Record], merge_gap: int = 
     return out
 
 
+# ------------------------------------------------------------------------------------------ politeness
+# Every HTTP request in this package goes through `_request`, which enforces per-host limits so that no server's
+# published (or unpublished) rate limit is approached:
+#   * NCEP (nomads / ftp / ftpprd): policy is 120 hits/minute per IP summed over those hosts, HEAD counted like GET
+#     (NWS SCN 21-32).  We stay at <= 60/minute in total and 2 connections.
+#   * AWS S3 open-data buckets: no published limit, but S3 answers 503 "SlowDown" when a prefix gets too many
+#     requests; we cap at 10 requests/s per bucket and back off on 503.
+#   * PRISM: one file at a time, one request every 2 s (its web service refuses a file fetched twice in 24 h).
+#   * ECMWF open data: far below its 500-simultaneous-connection limit.
+# On 429/503 (and 403 from NCEP, whose firewall blocks over-limit IPs) we honour Retry-After or back off
+# exponentially with jitter; after several consecutive throttles a host is left alone for COOLDOWN_S and requests
+# fail fast so the caller can fall back to another mirror.  404 (file not published yet) is never retried.  The
+# NWS asks clients not to retry a missing file immediately and to limit retries to 1-minute intervals; one run
+# makes a single pass over each file.
+RATE_SCALE = float(os.environ.get("PWPF_HTTP_RATE_SCALE", "1"))     # tests raise this; never lower rates below 1 in CI
+COOLDOWN_S = 300.0
+BREAKER_TRIP = 4                         # consecutive throttle responses before a host is left alone
+BACKOFF_CAP_S = 90.0
+RETRY_AFTER_CAP_S = 180.0
+
+
+class Limiter:
+    """Thread-safe token bucket; `acquire` blocks until the request may be made (clock/sleep are injectable)."""
+
+    def __init__(self, rate: float, burst: int, clock=time.monotonic, sleep=time.sleep):
+        self.rate, self.burst = float(rate), float(burst)
+        self._tokens, self._t = float(burst), clock()
+        self._clock, self._sleep, self._lock = clock, sleep, threading.Lock()
+
+    def acquire(self, n: float = 1.0) -> float:
+        with self._lock:
+            now = self._clock()
+            self._tokens = min(self.burst, self._tokens + (now - self._t) * self.rate)
+            self._t = now
+            self._tokens -= n
+            wait = 0.0 if self._tokens >= 0 else -self._tokens / self.rate
+        if wait > 0:
+            self._sleep(wait)
+        return wait
+
+
+@dataclass
+class Policy:
+    key: str
+    rate: float                          # requests per second, whole group
+    burst: int
+    max_conc: int
+    throttle_codes: tuple = (429, 503)
+
+    def __post_init__(self):
+        self.limiter = Limiter(self.rate * RATE_SCALE, self.burst)
+        self.sem = threading.BoundedSemaphore(self.max_conc)
+        self.lock = threading.Lock()
+        self.consecutive = 0
+        self.blocked_until = 0.0
+
+
+_NCEP_HOSTS = ("nomads.ncep.noaa.gov", "ftp.ncep.noaa.gov", "www.ftp.ncep.noaa.gov", "ftpprd.ncep.noaa.gov")
+_PRISM_HOSTS = ("prism.oregonstate.edu", "data.prism.oregonstate.edu", "ftp.prism.oregonstate.edu", "services.nacse.org")
+_policies: dict[str, Policy] = {}
+_policies_lock = threading.Lock()
+
+
+def policy_for(url: str) -> Policy:
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").lower()
+    if host in _NCEP_HOSTS:
+        key, mk = "ncep", lambda: Policy("ncep", 1.0, 3, 2, (429, 503, 403))
+    elif host in _PRISM_HOSTS:
+        key, mk = "prism", lambda: Policy("prism", 0.5, 1, 1)
+    elif host.endswith(".amazonaws.com"):
+        key, mk = host, lambda: Policy(host, 10.0, 20, 4)
+    elif host.endswith("ecmwf.int"):
+        key, mk = "ecmwf", lambda: Policy("ecmwf", 2.0, 4, 2)
+    else:
+        key, mk = host, lambda: Policy(host, 2.0, 4, 2)
+    with _policies_lock:
+        if key not in _policies:
+            _policies[key] = mk()
+        return _policies[key]
+
+
+class Stats:
+    """Per-policy request/byte/throttle counters for the run log."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.d = defaultdict(lambda: {"requests": 0, "bytes": 0, "throttled": 0, "waited_s": 0.0, "t0": time.monotonic()})
+
+    def add(self, key, **kw):
+        with self._lock:
+            row = self.d[key]
+            for k, v in kw.items():
+                row[k] += v
+
+    def report(self) -> str:
+        with self._lock:
+            rows = []
+            for k, r in sorted(self.d.items()):
+                mins = max((time.monotonic() - r["t0"]) / 60.0, 1e-9)
+                rows.append(f"{k}: {r['requests']} requests ({r['requests'] / mins:.0f}/min avg), "
+                            f"{r['bytes'] / 1e6:.0f} MB, {r['throttled']} throttled, {r['waited_s']:.0f} s spent waiting")
+            return "\n".join(rows) or "no HTTP requests made"
+
+
+STATS = Stats()
+
+
+def _backoff(attempt: int, retry_after: str | None) -> float:
+    if retry_after:
+        try:
+            return min(float(retry_after), RETRY_AFTER_CAP_S)
+        except ValueError:
+            pass
+    return min(BACKOFF_CAP_S, 2.0 * 2 ** attempt) * random.uniform(0.85, 1.25)
+
+
+def polite(url: str, cost: float = 1.0):
+    """Context manager for code that makes its own HTTP calls (e.g. the ecmwf-opendata client): reserves `cost`
+    requests from the host's rate limit and holds one of its connection slots."""
+    pol = policy_for(url)
+
+    class _Ctx:
+        def __enter__(self_inner):
+            pol.sem.acquire()
+            w = pol.limiter.acquire(cost)
+            STATS.add(pol.key, requests=int(round(cost)), waited_s=w)
+            return pol
+
+        def __exit__(self_inner, *a):
+            pol.sem.release()
+    return _Ctx()
+
+
 # ------------------------------------------------------------------------------------------ HTTP
 _tls = threading.local()
 
@@ -124,26 +269,118 @@ def _session():
     if s is None:
         import requests
         from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
         s = requests.Session()
         s.headers["User-Agent"] = USER_AGENT
-        retry = Retry(total=RETRIES, connect=RETRIES, read=RETRIES, backoff_factor=1.5, status_forcelist=(500, 502, 503, 504),
-                      allowed_methods=("GET", "HEAD"), respect_retry_after_header=True)
-        for scheme in ("https://", "http://"):
-            s.mount(scheme, HTTPAdapter(max_retries=retry, pool_maxsize=8))
+        for scheme in ("https://", "http://"):                       # retries are handled in _request (rate-aware)
+            s.mount(scheme, HTTPAdapter(max_retries=0, pool_maxsize=8))
         _tls.s = s
     return s
 
 
+def _request(url: str, headers=None, stream: bool = False, timeout=None):
+    """One polite GET: rate limit + connection cap + Retry-After/backoff + circuit breaker.  Returns the
+    Response (any final status, e.g. 404/206); raises FetchError if the host stays unreachable or throttled."""
+    pol = policy_for(url)
+    last = "no attempt"
+    for attempt in range(RETRIES + 1):
+        now = time.monotonic()
+        if pol.blocked_until > now:
+            raise FetchError(f"{url}: {pol.key} is rate-limiting this client; leaving it alone for another "
+                             f"{pol.blocked_until - now:.0f} s (last response: {last})")
+        r = None
+        with pol.sem:
+            w = pol.limiter.acquire()
+            try:
+                r = _session().get(url, headers=headers or {}, timeout=timeout or TIMEOUT, stream=stream)
+            except Exception as e:                                       # noqa: BLE001 - network-level failure
+                last = f"{type(e).__name__}: {e}"
+            STATS.add(pol.key, requests=1, waited_s=w)
+        if r is None:                                                    # connection problem: back off, retry
+            if attempt == RETRIES:
+                break
+            time.sleep(_backoff(attempt, None))
+            continue
+        if r.status_code in pol.throttle_codes:
+            last = f"HTTP {r.status_code}"
+            STATS.add(pol.key, throttled=1)
+            with pol.lock:
+                pol.consecutive += 1
+                if pol.consecutive >= BREAKER_TRIP:
+                    pol.blocked_until = time.monotonic() + COOLDOWN_S
+                    log.warning("%s throttled us %d times in a row: pausing all requests to it for %.0f s",
+                                pol.key, pol.consecutive, COOLDOWN_S)
+                    pol.consecutive = 0
+            wait = _backoff(attempt, r.headers.get("Retry-After"))
+            r.close()
+            if attempt == RETRIES:
+                break
+            log.info("%s answered %s; waiting %.0f s before retrying %s", pol.key, last, wait, url)
+            time.sleep(wait)
+            continue
+        if r.status_code in (500, 502, 504):                             # transient server trouble, not a throttle
+            last = f"HTTP {r.status_code}"
+            r.close()
+            if attempt == RETRIES:
+                break
+            time.sleep(_backoff(attempt, None))
+            continue
+        with pol.lock:
+            pol.consecutive = 0
+        if not stream:
+            STATS.add(pol.key, bytes=len(r.content))
+        return r
+    raise FetchError(f"{url}: gave up after {RETRIES + 1} attempts (last: {last})")
+
+
 def _get(url: str, headers=None):
     try:
-        r = _session().get(url, headers=headers or {}, timeout=TIMEOUT)
-    except Exception as e:                                           # noqa: BLE001 - re-raised with context
+        return _request(url, headers)
+    except FetchError:
+        raise
+    except Exception as e:                                               # noqa: BLE001 - re-raised with context
         raise FetchError(f"{url}: {type(e).__name__}: {e}") from e
-    return r
+
+
+def download_file(url: str, dest: Path, timeout=(15, 300), chunk: int = 1 << 20) -> int:
+    """Stream `url` to `dest` (atomic), politely; returns bytes written.  FetchError on any non-200."""
+    r = _request(url, stream=True, timeout=timeout)
+    try:
+        if r.status_code != 200:
+            raise HttpStatusError(f"{url}: HTTP {r.status_code}", r.status_code)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        n = 0
+        with open(tmp, "wb") as f:
+            for blk in r.iter_content(chunk):
+                f.write(blk)
+                n += len(blk)
+        STATS.add(policy_for(url).key, bytes=n)
+        os.replace(tmp, dest)
+        return n
+    finally:
+        r.close()
+
+
+_IDX_CACHE: "OrderedDict[str, list]" = OrderedDict()
+_IDX_LOCK = threading.Lock()
+_IDX_MAX = 2000
 
 
 def get_inventory(url: str) -> list[Record]:
+    """Parsed .idx of `url`; successful reads are remembered for the run so each file's inventory is fetched once."""
+    with _IDX_LOCK:
+        hit = _IDX_CACHE.get(url)
+        if hit is not None:
+            _IDX_CACHE.move_to_end(url)
+            return hit
+    recs = _get_inventory_uncached(url)
+    with _IDX_LOCK:
+        _IDX_CACHE[url] = recs
+        while len(_IDX_CACHE) > _IDX_MAX:
+            _IDX_CACHE.popitem(last=False)
+    return recs
+
+
+def _get_inventory_uncached(url: str) -> list[Record]:
     r = _get(url + ".idx")
     if r.status_code != 200:
         raise FetchError(f"{url}.idx: HTTP {r.status_code}")

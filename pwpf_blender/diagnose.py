@@ -119,4 +119,5 @@ def run(download: bool = False, only: list[str] | None = None) -> int:
             bad += 1
             print(f"[FAIL] terrain: {type(e).__name__}: {e}")
     print(f"{bad} feed(s) failing")
+    print("request budget used:\n  " + nh.STATS.report().replace("\n", "\n  "))
     return 1 if bad else 0

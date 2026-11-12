@@ -190,6 +190,8 @@ class Pipeline:
         self._fit_windows(res, specs, snow_bins, weights, n_ok, bin_h, ice=False, bins_ice=None)
         if ice_on:
             self._fit_windows(res, specs, snow_bins, weights, n_ok, bin_h, ice=True, bins_ice=ice_bins)
+        from . import noaa_http as _nh
+        log.info("HTTP request budget:\n%s", _nh.STATS.report())
         res.meta = {"n_members": n_ok, "bin_hours": bin_h, "prism_downscale": self.downscaler.monthly is not None,
                     "windows": [s.id for s in specs], "ice_windows": sorted(res.ice)}
         return res
