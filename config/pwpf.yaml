@@ -13,7 +13,11 @@ grid:
 cycle_hours: [0, 12]         # nominal cycles; every period is measured from the cycle time
 bin_hours: 6                 # QPF/SLR/ptype are evaluated in 6-h bins, then summed into the periods below
 workers: 4                   # concurrent member loads/processing
-min_members: 8               # abort if fewer members survive
+# Missing data: a member that fails (or does not reach a lead time) is left out of just the periods it cannot
+# fully cover; each period is blended from whoever delivered it, weights renormalised.
+min_members: 4               # a period with fewer complete members than this is skipped (not an error)
+warn_members: 8              # periods with fewer members are flagged "reduced ensemble" in the viewer
+member_failure_limit: 2      # stop trying a member after this many consecutive failed bins
 
 # PWPF periods (About PWPF Products): 24 h totals every 6 h out to 72 h, 48 h totals made of two adjacent
 # 24 h periods, and one 72 h total.  Ids: s24_f030 = 24 h ending 30 h after the cycle.  24-h-multiples only.
