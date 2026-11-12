@@ -140,6 +140,15 @@ class NoaaSource(Source):
         self._lock = threading.Lock()
         self._acc: dict = {}             # (init, fxx, member) -> {(a, b): array}; small FIFO
 
+    def available(self, init, fxx, member) -> bool:
+        """Inventory (.idx) of every file for this hour exists on a mirror (the idx is written after the GRIB)."""
+        try:
+            for p in self.plan(init, fxx, member):
+                nh.get_inventory_first(p.urls)
+        except nh.FetchError:
+            return False
+        return True
+
     # ------------------------------------------------------------------ IO
     def _fetch(self, init, fxx, member, apcp_only=False) -> dict:
         fields: dict = {}
@@ -193,6 +202,16 @@ class NoaaSource(Source):
             for (a, b), arr in cur.items():
                 if b == t1 and a < t0 and (a, t0) in prev:
                     return np.clip(arr - prev[(a, t0)], 0, None)
+        # last resort: add up the hourly (h-1, h) records, e.g. a model that only publishes 1-h buckets at some hours
+        hourly = []
+        for h in range(t0 + 1, t1 + 1):
+            acc_h = cur if h == t1 else self._acc_at(init, h, member)
+            if (h - 1, h) not in acc_h:
+                hourly = None
+                break
+            hourly.append(acc_h[(h - 1, h)])
+        if hourly:
+            return np.clip(sum(hourly[1:], hourly[0]), 0, None)
         raise nh.FetchError(f"{self.name} f{t1:03d}: no usable APCP accumulation for ({t0}, {t1}] h; "
                             f"have {sorted(cur)}")
 
@@ -319,7 +338,7 @@ class IfsSource(Source):
                         "azure": "https://ecmwf.blob.core.windows.net/",
                         "google": "https://storage.googleapis.com/"}.get(self.source, "https://data.ecmwf.int/")
                 with nh.polite(host, cost=1 + len(steps)):
-                    Client(source=self.source, maximum_retries=3, retry_after=60).retrieve(**req)
+                    Client(source=self.source, maximum_retries=5, retry_after=20).retrieve(**req)
             except Exception as e:                                   # noqa: BLE001
                 raise nh.FetchError(f"ECMWF open data ({self.source}) request failed: {type(e).__name__}: {e}; "
                                     f"request={ {k: v for k, v in req.items() if k != 'target'} }") from e

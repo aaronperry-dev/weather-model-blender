@@ -31,6 +31,11 @@ class Source(ABC):
     src_dx_km: float = 25.0
     native_ptype: bool = False          # model provides categorical rain/snow/sleet/fzra fields
 
+    def available(self, init: datetime, fxx: int, member) -> bool:
+        """Is forecast hour `fxx` of this run already published?  Used to step back to the previous run when the
+        newest one is still being uploaded.  Default: assume yes."""
+        return True
+
     @abstractmethod
     def grid(self) -> SourceGrid: ...
 
