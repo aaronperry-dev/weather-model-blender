@@ -186,3 +186,79 @@ def test_boundary_hierarchy_layers_exist(page):
         assert n in names, n
     z = page.evaluate("['bcase','b-counties','b-states','b-coast','b-countries'].map(n => +getComputedStyle(document.querySelector('.leaflet-' + n + '-pane')).zIndex)")
     assert z == sorted(z) and z[-1] < 450                                                    # countries on top, below place labels
+
+
+TILES = """() => { const r = {adj: 0, raw: 0, painted: 0};
+  document.querySelectorAll('.leaflet-overlay-pane canvas.leaflet-tile').forEach(c => {
+    if (getComputedStyle(c).visibility !== 'visible') return;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i]) n++;
+    if (!n) return;
+    r.painted += n; if (c.dataset.adjusted === '1') r.adj++; else r.raw++; });
+  r.layers = document.querySelectorAll('.leaflet-overlay-pane .leaflet-layer').length; return r; }"""
+
+
+def _zoom(page, z, lat=44.5, lon=-95):
+    page.evaluate("window.__pwpfMap.setView([%s, %s], %s, {animate: false}); null" % (lat, lon, z))
+
+
+def test_terrain_adjustment_off_then_on_returns_the_adjusted_data(page):
+    """Regression: after off -> on the adjusted (high resolution) data did not come back."""
+    _zoom(page, 7)
+    page.wait_for_timeout(2500)
+    a = page.evaluate(TILES)
+    assert a["adj"] >= 4 and a["raw"] == 0 and a["painted"] > 5000
+    for _ in range(2):
+        page.uncheck("#terrainAdj")
+        page.wait_for_timeout(1500)
+        b = page.evaluate(TILES)
+        assert b["raw"] >= 4 and b["adj"] == 0 and b["painted"] > 5000 and b["layers"] == 1
+        page.check("#terrainAdj")
+        page.wait_for_timeout(2500)
+        c = page.evaluate(TILES)
+        assert c["adj"] >= 4 and c["raw"] == 0 and c["painted"] > 5000 and c["layers"] == 1
+    assert not page.errors
+
+
+def test_rapid_toggling_with_slow_elevation_tiles_ends_in_the_chosen_state(page):
+    import time
+
+    def slow(r):
+        z, x, y = (int(t) for t in r.request.url.split("terrarium/")[1][:-4].split("/"))
+        time.sleep(0.25)
+        r.fulfill(body=_terrarium(x, y), content_type="image/png", headers={"access-control-allow-origin": "*"})
+    page.context.route("**/elevation-tiles-prod/**", slow)
+    _zoom(page, 8, 40.5, -100)
+    page.wait_for_timeout(500)
+    for _ in range(4):
+        page.uncheck("#terrainAdj")
+        page.wait_for_timeout(200)
+        page.check("#terrainAdj")
+        page.wait_for_timeout(200)
+    page.wait_for_timeout(9000)
+    a = page.evaluate(TILES)
+    assert a["adj"] >= 4 and a["raw"] == 0 and a["layers"] == 1                 # settled on adjusted, old layers gone
+    page.uncheck("#terrainAdj")
+    page.wait_for_timeout(1500)
+    b = page.evaluate(TILES)
+    assert b["raw"] >= 4 and b["adj"] == 0 and b["painted"] > 5000
+    assert not page.errors
+
+
+def test_data_stays_visible_when_elevation_tiles_fail_or_hang(page):
+    _zoom(page, 7)
+    page.wait_for_timeout(2500)                                                   # some elevation tiles load fine first
+    assert page.evaluate(TILES)["adj"] >= 4
+    page.context.route("**/elevation-tiles-prod/**", lambda r: r.abort())      # every elevation tile fails
+    _zoom(page, 9, 38.0, -98)
+    page.wait_for_timeout(6000)
+    a = page.evaluate(TILES)
+    assert a["raw"] >= 4 and a["painted"] > 5000                                  # un-adjusted, but not blank
+    page.context.unroute("**/elevation-tiles-prod/**")
+    page.context.route("**/elevation-tiles-prod/**", lambda r: None)             # requests that never answer
+    page.evaluate("window.__pwpfDemTimeoutMs = 600; null")
+    _zoom(page, 9, 36.0, -101)
+    page.wait_for_timeout(7000)
+    b = page.evaluate(TILES)
+    assert b["raw"] >= 4 and b["painted"] > 5000
+    assert not page.errors

@@ -528,9 +528,36 @@ def test_index_files_are_fetched_once_for_all_members(tmp_path):
     IfsSource._cache_indexes(c2)
     a = c1.session.get("https://h/ok-1.index")
     b = c2.session.get("https://h/ok-1.index")
-    assert len(calls) == 1 and a.content == b.content and list(b.iter_lines()) == [b'{"a": 1}']
+    assert list(b.iter_lines()) == [b'{"a": 1}']                        # the first thing the ecmwf client does
+    assert len(calls) == 1 and a.content == b.content and a.json() == {"a": 1}
     assert c1.session.get("https://h/bad.index").status_code == 503
     assert c1.session.get("https://h/bad.index").status_code == 503      # errors are not cached
     assert len(calls) == 3
     c1.session.get("https://h/data.grib2")                                # other URLs pass straight through
     assert len(calls) == 4
+
+
+def test_cached_index_works_with_the_real_ecmwf_client_parser(monkeypatch):
+    """The production failure: 'NoneType' object has no attribute 'read' from iter_lines() on a cached index response."""
+    pytest.importorskip("ecmwf.opendata")
+    import requests
+    from ecmwf.opendata import Client
+    from pwpf_blender.sources.noaa_sources import IfsSource
+    monkeypatch.setattr(IfsSource, "_index_cache", {})
+    lines = b"".join(json.dumps({"param": p, "step": "12", "number": "9", "stream": "enfo", "type": "pf", "levtype": "sfc",
+                                 "_offset": i * 100, "_length": 100}).encode() + b"\n" for i, p in enumerate(["tp", "2t", "sp", "10u"]))
+    calls = []
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        r = requests.Response()
+        r.status_code, r._content = 200, lines
+        return r
+
+    url = "https://x/20261112/00z/ifs/0p25/enfo/20261112000000-12h-enfo-ef.grib2"
+    for _ in range(2):                                                        # the second pass is served from the cache
+        c = Client(source="aws")
+        c.session.get = fake_get
+        IfsSource._cache_indexes(c)
+        assert c.get_parts([url], {"param": ["tp", "2t", "sp"], "step": ["12"], "number": ["9"]}) == [(url, ((0, 100), (100, 100), (200, 100)))]
+    assert len(calls) == 1

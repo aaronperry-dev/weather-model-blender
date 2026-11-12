@@ -105,3 +105,46 @@ def test_ifs_probe_false_only_on_a_definite_404(monkeypatch):
     assert src.available(datetime(2026, 11, 12, 12), 72, 3)
     src, _ = _ifs(monkeypatch, {"aws": nh.FetchError("throttled"), "g": nh.FetchError("throttled")})
     assert src.available(datetime(2026, 11, 12, 12), 72, 3)                 # unknown is not "missing"
+
+
+# ---------------------------------------------------------------- NOMADS answers 403 for a run that is not published yet
+def test_noaa_probe_treats_403_as_not_published_without_penalising_the_host(monkeypatch):
+    from pwpf_blender.sources.noaa_sources import NoaaSource
+    nh._IDX_CACHE.clear()
+    url_a = "https://nomads.example/cmce.20261112/12/f.idx"
+    sent = []
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.headers, self.text, self.content = code, {}, "", b""
+
+        def close(self):
+            pass
+
+    class Sess:
+        def get(self, url, **kw):
+            sent.append(url)
+            return R(403 if "/12/" in url else 200)
+    monkeypatch.setattr(nh, "_session", lambda: Sess())
+    monkeypatch.setattr(nh, "parse_idx", lambda text: ["rec"])
+    monkeypatch.setattr(nh.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("probe must not sleep")))
+    pol = nh.Policy("nomads.example", 1000.0, 1000, 4, (429, 503, 403))
+    monkeypatch.setattr(nh, "policy_for", lambda u: pol)
+    plan = lambda init, fxx, m: [SimpleNamespace(urls=[f"https://nomads.example/cmce.20261112/{init:%H}/f"])]   # noqa: E731
+    src = NoaaSource("cmce", plan, 3, 25.0)
+    assert not src.available(datetime(2026, 11, 12, 12), 72, 1)           # 403 = not published
+    assert len(sent) == 1                                                  # one request: no retries
+    assert pol.blocked_until == 0   # host not put on a cool-down
+    assert pol.consecutive == 0
+    assert src.available(datetime(2026, 11, 12, 0), 72, 1)                # the fall-back run is probed straight away
+
+
+def test_noaa_probe_unknown_is_not_missing(monkeypatch):
+    from pwpf_blender.sources.noaa_sources import NoaaSource
+    nh._IDX_CACHE.clear()
+    monkeypatch.setattr(nh, "_get_inventory_uncached", lambda url, probe=False: (_ for _ in ()).throw(nh.FetchError("timeout")))
+    src = NoaaSource("x", lambda i, f, m: [SimpleNamespace(urls=["https://h/a", "https://h/b"])], 3, 25.0)
+    assert src.available(datetime(2026, 11, 12, 12), 6, 1)
+    monkeypatch.setattr(nh, "_get_inventory_uncached",
+                        lambda url, probe=False: (_ for _ in ()).throw(nh.HttpStatusError("x", 404)))
+    assert not src.available(datetime(2026, 11, 12, 12), 6, 1)
