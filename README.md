@@ -233,6 +233,15 @@ vs model height and the factor applied. An optional hill-shade layer (same tiles
 ridges. Terrain data: Mapzen / AWS Terrain Tiles (USGS 3DEP, SRTM, GMTED2010, ETOPO1 and others); the attribution is added to
 the map when the layer is in use.
 
+### Accumulation (warm ground / marginal air)
+
+This is **our own addition, not part of WPC's published method**. Fresh-fallen snow does not all accumulate: in marginal air a share of the falling "snow" is wet and melts on contact, and early-season ground still holds heat. Without this the blend overstates totals in November and in valley/lowland marginal setups. Two terms, both configured under `accumulation:` in `config/pwpf.yaml`:
+
+1. **Marginal-air efficiency** (per 6-h bin, per member). The ground wet-bulb is estimated as `0.5 °C + wb_lapse_c_per_km × (snow level − terrain)/1000`. Efficiency is 1.0 at or below `wb_full_c` (−1 °C) and falls linearly to `min_eff` (0.25) at or above `wb_zero_c` (+1.5 °C). It multiplies snow, not QPF.
+2. **Warm-ground melt.** A soil-temperature climatology (latitude, day of year, −6.5 °C/km with elevation, floored at 0) sets a snow depth that is lost first: `ground_melt_in_per_c × T_soil` inches (about 1 in at 43 N on 12 Nov, near 0 by January). It is applied to each member's *running total*, so the 24/48/72-h windows still telescope (a 72-h total equals the sum of its 24-h parts).
+
+Set `accumulation.enabled: false` to switch both off. The manifest records the settings, and the dashboard About text mentions them when active. The calibration table gains **air eff** and **gnd eff** columns so you can see how much each term removed at the reference towns versus NWS. All parameters are assumptions, not fitted values; tune them against that table.
+
 ### Calibration report
 Every run ends with a `=== calibration report ===` block in the log (`calibration:` in `config/pwpf.yaml`): for the 72-h period and the 24-h period ending 30 h after the cycle it prints, for a Northeast box, the percentage of area at or above 0.1/1/2/4/6/12 in plus mean, 99th percentile and maximum - for the blended mode, the blended 50th percentile, the plain member mean, and **each model group on its own** - and, for the 72-h period, our value at ~24 reference towns next to the NWS WFO "expected snowfall" labels read off the official maps (`pwpf_blender/calibration.py`; edit the list for another event). It shows at a glance whether the blend is high or low against the official forecasts and which model group drives it, before any SLR / mode / QPF knob is touched. The browser-side terrain adjustment is not included.
 
