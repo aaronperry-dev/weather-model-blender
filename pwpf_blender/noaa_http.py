@@ -305,10 +305,15 @@ def _session():
     return s
 
 
-def _request(url: str, headers=None, stream: bool = False, timeout=None):
+def _request(url: str, headers=None, stream: bool = False, timeout=None, probe: bool = False):
     """One polite GET: rate limit + connection cap + Retry-After/backoff + circuit breaker.  Returns the
-    Response (any final status, e.g. 404/206); raises FetchError if the host stays unreachable or throttled."""
+    Response (any final status, e.g. 404/206); raises FetchError if the host stays unreachable or throttled.
+
+    probe=True: "is this file published yet?".  NOMADS answers 403 (not 404) for a run directory that does not exist
+    yet, so a 403 on a probe is an answer, not a throttle: no retries, no back-off, no penalty for the host and no
+    circuit-breaker count (otherwise one unpublished run pauses the host and its fall-back run cannot be probed)."""
     pol = policy_for(url)
+    throttle = tuple(c for c in pol.throttle_codes if not (probe and c == 403))
     last = "no attempt"
     for attempt in range(RETRIES + 1):
         now = time.monotonic()
@@ -328,7 +333,7 @@ def _request(url: str, headers=None, stream: bool = False, timeout=None):
                 break
             time.sleep(_backoff(attempt, None))
             continue
-        if r.status_code in pol.throttle_codes:
+        if r.status_code in throttle:
             last = f"HTTP {r.status_code}"
             STATS.add(pol.key, throttled=1)
             with pol.lock:
@@ -392,9 +397,9 @@ def mount_polite(session) -> None:
         session.mount(scheme, PoliteAdapter(max_retries=0, pool_maxsize=8))
 
 
-def _get(url: str, headers=None):
+def _get(url: str, headers=None, probe: bool = False):
     try:
-        return _request(url, headers)
+        return _request(url, headers, probe=probe)
     except FetchError:
         raise
     except Exception as e:                                               # noqa: BLE001 - re-raised with context
@@ -425,14 +430,14 @@ _IDX_LOCK = threading.Lock()
 _IDX_MAX = 2000
 
 
-def get_inventory(url: str) -> list[Record]:
+def get_inventory(url: str, probe: bool = False) -> list[Record]:
     """Parsed .idx of `url`; successful reads are remembered for the run so each file's inventory is fetched once."""
     with _IDX_LOCK:
         hit = _IDX_CACHE.get(url)
         if hit is not None:
             _IDX_CACHE.move_to_end(url)
             return hit
-    recs = _get_inventory_uncached(url)
+    recs = _get_inventory_uncached(url, probe)
     with _IDX_LOCK:
         _IDX_CACHE[url] = recs
         while len(_IDX_CACHE) > _IDX_MAX:
@@ -440,22 +445,22 @@ def get_inventory(url: str) -> list[Record]:
     return recs
 
 
-def _get_inventory_uncached(url: str) -> list[Record]:
-    r = _get(url + ".idx")
+def _get_inventory_uncached(url: str, probe: bool = False) -> list[Record]:
+    r = _get(url + ".idx", probe=probe)
     if r.status_code != 200:
-        raise FetchError(f"{url}.idx: HTTP {r.status_code}")
+        raise HttpStatusError(f"{url}.idx: HTTP {r.status_code}", r.status_code)
     try:
         return parse_idx(r.text)
     except FetchError as e:
         raise FetchError(f"{url}.idx: {e}") from e
 
 
-def get_inventory_first(urls):
+def get_inventory_first(urls, probe: bool = False):
     """(records, url) for the first candidate whose .idx can be read; FetchError lists every failure."""
     errs = []
     for u in urls:
         try:
-            return get_inventory(u), u
+            return get_inventory(u, probe=probe), u
         except FetchError as e:
             errs.append(str(e))
     raise FetchError("all sources failed:\n  " + "\n  ".join(errs))

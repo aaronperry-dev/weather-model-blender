@@ -41,7 +41,7 @@ def _latest_init(plan_fn, member, run_hours, fxx, now, max_back_h=None):
         try:
             plans = plan_fn(init, fxx, member)
             for p in plans:
-                nh.get_inventory_first(p.urls)
+                nh.get_inventory_first(p.urls, probe=True)
             return init, plans
         except nh.FetchError:
             continue
