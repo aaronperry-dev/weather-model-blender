@@ -4,6 +4,7 @@ Real GRIB2 messages are written with eccodes and served from a local HTTP server
 so the download + decode path is exercised end to end without network access."""
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import threading
 from datetime import datetime
@@ -421,3 +422,74 @@ def test_ifs_span_fetches_once_and_decodes_only_wanted_steps(tmp_path, monkeypat
     assert [o.valid for o in a] == [INIT + timedelta(hours=6), INIT + timedelta(hours=12)]
     assert [o.valid for o in b] == [INIT + timedelta(hours=18), INIT + timedelta(hours=24)]
     assert float(b[0].qpf_mm[0, 0]) == pytest.approx(6.0, abs=1e-3)     # tp(18)-tp(12)
+
+
+# ---------------------------------------------------------------------------- NOMADS grib-filter path (CMC GEPS)
+CMCE_IDX = """1:0:d=2026111112:TMP:2 m above ground:24 hour fcst:ENS=+7
+2:1000:d=2026111112:RH:2 m above ground:24 hour fcst:ENS=+7
+3:2000:d=2026111112:UGRD:10 m above ground:24 hour fcst:ENS=+7
+4:3000:d=2026111112:TMP:850 mb:24 hour fcst:ENS=+7
+5:4000:d=2026111112:HGT:850 mb:24 hour fcst:ENS=+7
+6:5000:d=2026111112:UGRD:850 mb:24 hour fcst:ENS=+7
+7:6000:d=2026111112:RH:850 mb:24 hour fcst:ENS=+7
+8:7000:d=2026111112:APCP:surface:0-24 hour acc fcst:ENS=+7
+9:8000:d=2026111112:PRES:surface:24 hour fcst:ENS=+7
+10:9000:d=2026111112:CAPE:surface:24 hour fcst:ENS=+7
+"""
+
+
+def _fake_filter_download(monkeypatch, n_msgs, tmp_path, body=None):
+    urls = []
+    shape = (4, 6)
+
+    def fake(url, dest, **k):
+        urls.append(url)
+        if body is not None:
+            Path(dest).write_bytes(body)
+        else:
+            blob = b"".join(_ifs_msg("2t", "heightAboveGround", 2, 24, np.full(shape, 270.0 + i, np.float32))
+                            for i in range(n_msgs))
+            Path(dest).write_bytes(blob)
+        return 1
+    monkeypatch.setattr(nh, "download_file", fake)
+    monkeypatch.setattr(nh, "get_inventory", lambda url: nh.parse_idx(CMCE_IDX))
+    return urls
+
+
+def test_grib_filter_request_and_decode(monkeypatch, tmp_path):
+    spec = (ns.CMCE_FILTER, "/cmce.20261111/12/pgrb2ap5", "cmc_gep07.t12z.pgrb2a.0p50.f024")
+    # variables x levels selected: {TMP,RH,HGT,APCP,PRES} x {2 m, 850 mb, surface} -> records 1,2,4,5,7,8,9
+    urls = _fake_filter_download(monkeypatch, 7, tmp_path)
+    f, grid, url = nh.fetch_fields_filtered("http://x/idx", spec, (ns.PAT_LEVELS, ns.PAT_SFC, ns.PAT_2M), want_grid=True)
+    assert url == urls[0] and url.startswith(ns.CMCE_FILTER + "?")
+    for part in ("dir=%2Fcmce.20261111%2F12%2Fpgrb2ap5", "file=cmc_gep07.t12z.pgrb2a.0p50.f024", "var_TMP=on", "var_RH=on",
+                 "var_HGT=on", "var_APCP=on", "var_PRES=on", "lev_2_m_above_ground=on", "lev_850_mb=on", "lev_surface=on"):
+        assert part in url
+    assert "var_UGRD" not in url and "var_CAPE" not in url
+    assert set(f) == {("TMP", "2 m above ground", "24 hour fcst"), ("RH", "2 m above ground", "24 hour fcst"),
+                      ("TMP", "850 mb", "24 hour fcst"), ("HGT", "850 mb", "24 hour fcst"), ("RH", "850 mb", "24 hour fcst"),
+                      ("APCP", "surface", "0-24 hour acc fcst"), ("PRES", "surface", "24 hour fcst")}
+    assert grid is not None
+
+
+def test_grib_filter_non_grib_response_is_an_error(monkeypatch, tmp_path):
+    spec = (ns.CMCE_FILTER, "/d", "f")
+    _fake_filter_download(monkeypatch, 0, tmp_path, body=b"<html>Data file is not present</html>")
+    with pytest.raises(nh.FetchError, match="did not return GRIB"):
+        nh.fetch_fields_filtered("http://x/idx", spec, (ns.PAT_SFC,))
+
+
+def test_cmce_plan_and_source_falls_back_to_byte_ranges(monkeypatch):
+    p = ns.plan_cmce(datetime(2026, 11, 11, 12), 24, 7)[0]
+    assert p.urls[0].endswith("/naefs/prod/cmce.20261111/12/pgrb2ap5/cmc_gep07.t12z.pgrb2a.0p50.f024")
+    assert p.filt == (ns.CMCE_FILTER, "/cmce.20261111/12/pgrb2ap5", "cmc_gep07.t12z.pgrb2a.0p50.f024")
+    assert ns.plan_cmce(datetime(2026, 11, 11, 0), 3, "avg")[0].filt[2] == "cmc_geavg.t00z.pgrb2a.0p50.f003"
+    shape = (2, 2)
+    grid = nh.GridInfo(np.array([40.0, 30.0]), np.array([250.0, 260.0]), shape, "regular_ll")
+    good = {("TMP", "2 m above ground", "24 hour fcst"): np.full(shape, 270, np.float32)}
+    calls = []
+    monkeypatch.setattr(nh, "fetch_fields_filtered", lambda *a, **k: (_ for _ in ()).throw(nh.FetchError("boom")))
+    monkeypatch.setattr(nh, "fetch_fields", lambda urls, pats, want_grid=False, **k: (calls.append(urls) or (good, grid, urls[0])))
+    src = ns.cmce()
+    out = src._fetch(datetime(2026, 11, 11, 12), 24, 7)
+    assert calls and ("TMP", "2 m above ground", "24 hour fcst") in out
