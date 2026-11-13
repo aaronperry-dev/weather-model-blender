@@ -14,6 +14,10 @@ on:
         description: "Cycle (ISO UTC, e.g. 2026-01-15T12) or 'auto'"
         required: false
         default: "auto"
+      accumulation:
+        description: "Accumulation term (not in WPC's recipe): default = config/pwpf.yaml (off); on/off for an A/B run"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -92,12 +96,44 @@ jobs:
           path: static/prism_raw
           key: prism-raw-v1-${{ github.run_id }}
 
+      # Rolling archive of raw 24 h forecast fields, the NOHRSC analyses already downloaded, the scoring ledger and
+      # the forecast/observation pairs for the calibration fit.  Every run saves a new copy; the newest one is restored.
+      - name: Restore verification archive
+        id: archive
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            archive
+            nohrsc_cache
+          key: verify-archive-v1-none
+          restore-keys: verify-archive-v1-
+
       - name: Run pipeline
         run: |
-          ARGS="--cycle ${{ inputs.cycle || 'auto' }} --out site/data --save-npz"
+          ARGS="--cycle ${{ inputs.cycle || 'auto' }} --out site/data --save-npz --archive-dir archive"
+          if [ -n "${{ inputs.accumulation }}" ]; then ARGS="$ARGS --accumulation ${{ inputs.accumulation }}"; fi
           if [ "$PROFILE" = "synthetic" ]; then ARGS="$ARGS --synthetic"
           elif [ "$PROFILE" != "full" ]; then ARGS="$ARGS --profile $PROFILE"; fi
           python -m pwpf_blender run $ARGS
+
+      # Score archived cycles against the NOHRSC snowfall analysis (needs the NOHRSC site; informational - a failure here
+      # never blocks the forecast).  Writes site/data/verification.txt/.json and the calibration fit into archive/.
+      - name: Verify archived cycles against NOHRSC
+        if: env.PROFILE != 'synthetic'
+        continue-on-error: true
+        run: |
+          ARGS="--archive archive --cache nohrsc_cache --out site/data"
+          if [ "$PROFILE" != "full" ]; then ARGS="$ARGS --profile $PROFILE"; fi
+          python -m pwpf_blender verify-archive $ARGS
+
+      - name: Save verification archive
+        if: always() && hashFiles('archive/**') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            archive
+            nohrsc_cache
+          key: verify-archive-v1-${{ github.run_id }}
 
       - name: Assemble site
         run: cp -r web/. site/          # includes web/borders/
@@ -109,7 +145,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: fields-npz
-          path: site/fields_*.npz
+          path: |
+            site/fields_*.npz
+            site/data/verification.txt
           if-no-files-found: ignore
           retention-days: 3
 
