@@ -2,13 +2,18 @@
 (function () {
   'use strict';
   var DATA = 'data/';
-  var state = { win: null, prod: 'snow', kind: 'mode', thr: null, pct: 50, pt: null, adj: true, shade: true };
+  var state = { win: null, prod: 'snow', kind: 'mode', thr: null, pct: 50, pt: null, adj: true, shade: true, minFt: 0 };   // minFt: hide data where the ground is lower than this many feet (0 = off)
   var manifest, map, overlay, shown, shadeLayer, cache = {}, cacheOrder = [], current = null, mercator, zref = null, zrefP = null;
 
   function $(id) { return document.getElementById(id); }
   var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   function pad(n) { return (n < 10 ? '0' : '') + n; }
+  /* Everything the viewer shows is imperial: snowfall in inches, heights in feet, temperatures in degrees F, distances in miles. */
+  var M2FT = 3.28084, FT2M = 0.3048, MAX_FT = 20000;
+  function ftNum(m) { return Math.round(m * M2FT).toLocaleString('en-US'); }
+  function ftTxt(m) { return ftNum(m) + ' ft'; }
+  function minElevM() { return state.minFt > 0 ? state.minFt * FT2M : null; }
   function utc(iso) { return new Date(/(Z|[+-]\d\d:?\d\d)$/.test(iso) ? iso : iso + 'Z'); }   // naive ISO strings are UTC
   function fmtTime(iso) {
     var d = utc(iso);
@@ -28,11 +33,12 @@
       if (p[0] === 'q') state.pct = +p[1];
       if (p[0] === 'ta') state.adj = p[1] !== '0';
       if (p[0] === 'sh') state.shade = p[1] !== '0';
+      if (p[0] === 'el') state.minFt = Math.max(0, Math.min(MAX_FT, Math.round(+p[1]) || 0));
       if (p[0] === 'p') { var ll = p[1].split(','); if (ll.length === 2) state.pt = { lat: +ll[0], lng: +ll[1] }; }
     });
   }
   function writeHash() {
-    history.replaceState(null, '', '#w=' + state.win + '&x=' + state.prod + '&k=' + state.kind + '&t=' + state.thr + '&q=' + state.pct + '&ta=' + (state.adj ? 1 : 0) + '&sh=' + (state.shade ? 1 : 0) +
+    history.replaceState(null, '', '#w=' + state.win + '&x=' + state.prod + '&k=' + state.kind + '&t=' + state.thr + '&q=' + state.pct + '&ta=' + (state.adj ? 1 : 0) + '&sh=' + (state.shade ? 1 : 0) + (state.minFt > 0 ? '&el=' + state.minFt : '') +
       (state.pt ? '&p=' + state.pt.lat.toFixed(3) + ',' + state.pt.lng.toFixed(3) : ''));
   }
 
@@ -176,6 +182,7 @@
   }
   function adjustOn() { return !!(state.adj && manifest.terrain && manifest.terrain.enabled && zref && current && current.pot && !demDown()); }
   function adjustHere() { return adjustOn() && Math.round(map.getZoom()) >= manifest.terrain.min_zoom; }     // the layer only adjusts from min_zoom
+  function elevationAvail() { return !!(manifest.terrain && manifest.terrain.enabled && !demDown()); }
   function elevationOn() { return !!(manifest.terrain && manifest.terrain.enabled && !demDown() && Math.round(map.getZoom()) >= manifest.terrain.min_zoom); }
 
   function product() {
@@ -193,6 +200,7 @@
       var label = (next === undefined ? '≥ ' + pal.stops[i] : pal.stops[i] + ' – ' + next) + unit;
       html += '<div class="row"><span class="sw" style="background:' + pal.colors[i] + '"></span>' + label + '</div>';
     }
+    if (state.minFt > 0) html += '<div class="muted small" style="margin-top:6px">Hidden where the ground is below ' + state.minFt.toLocaleString('en-US') + ' ft.</div>';
     $('legend').innerHTML = html;
   }
 
@@ -204,7 +212,10 @@
     options: { pane: 'overlayPane', tileSize: 256, updateWhenZooming: false, keepBuffer: 1, noWrap: true },
     /* `adjust` is fixed for the life of the layer (a toggle builds a new layer, see setField), so a tile never has to
        guess which variant it belongs to. */
-    setData: function (params, product, pal, adjust) { this._params = params; this._product = product; this._pal = pal; this._adjust = !!adjust; },
+    setData: function (params, product, pal, adjust, minElev) {
+      this._params = params; this._product = product; this._pal = pal; this._adjust = !!adjust;
+      this._minElev = typeof minElev === 'number' ? minElev : null;            // elevation filter (m), fixed for the life of the layer too
+    },
     createTile: function (coords, done) {
       var self = this, size = this.getTileSize().x, sc = this.options.scale, n = size * sc, finished = false;
       var c = L.DomUtil.create('canvas', 'leaflet-tile');
@@ -212,23 +223,27 @@
       /* Leaflet ignores a done() called before createTile returns (the tile would stay hidden), and a tile that never calls
          it stays hidden forever: so done() is always called, once, asynchronously - whatever happens while painting. */
       function finish() { if (finished) return; finished = true; setTimeout(function () { done(null, c); }, 0); }
+      var needAdj = self._adjust && coords.z >= manifest.terrain.min_zoom, needFilter = self._minElev !== null;
       function draw(dem) {
+        var adj = !!(dem && needAdj);
         var rgba = PWPFCore.renderTile({ params: self._params, merc: manifest.mercator, pal: self._pal, product: self._product,
           alpha: 1, z: coords.z, tx: coords.x, ty: coords.y, size: size, scale: sc,
-          zref: dem ? zref : null, dem: dem, adjust: dem ? PWPFTerrain.config(manifest.terrain) : null });
+          zref: adj ? zref : null, dem: dem, adjust: adj ? PWPFTerrain.config(manifest.terrain) : null, minElev: self._minElev });
         c.getContext('2d').putImageData(new ImageData(rgba, n, n), 0, 0);
-        c.dataset.adjusted = dem ? '1' : '0';
+        c.dataset.adjusted = adj ? '1' : '0';
+        if (needFilter && !dem) { c.dataset.elev = 'missing'; elevMissing++; setTimeout(elevNote, 0); }      // nothing is drawn: we cannot place it above the line
+        else if (needFilter) c.dataset.elev = 'ok';
       }
       function paint(dem) {
         try {
           if (self._params) draw(dem);
         } catch (e) {
           console.error('data tile failed' + (dem ? ' (with terrain adjustment); drawing it without' : ''), e);
-          if (dem) { try { draw(null); } catch (e2) { console.error(e2); } }
+          if (dem && !needFilter) { try { draw(null); } catch (e2) { console.error(e2); } }
         }
         finish();
       }
-      if (self._adjust && coords.z >= manifest.terrain.min_zoom && !demDown()) {
+      if ((needAdj || needFilter) && !demDown()) {
         demFor(coords).then(paint, function () { paint(null); });
       } else paint(null);
       return c;
@@ -258,7 +273,7 @@
       return c;
     }
   });
-  var shadeCache = {}, shadeKeys = [];
+  var shadeCache = {}, shadeKeys = [], elevMissing = 0;
 
   var TERRAIN_ATTR = 'Terrain: AWS Terrain Tiles (Mapzen; USGS 3DEP, SRTM, GMTED2010, ETOPO1)';
   function dprScale() { return Math.min(2, Math.max(1, Math.round(window.devicePixelRatio || 1))); }
@@ -270,7 +285,8 @@
     var layer = new DataLayer({ bounds: L.latLngBounds(manifest.bounds), scale: dprScale(), opacity: +$('opacity').value,
                                 minZoom: 0, maxZoom: 18,
                                 attribution: manifest.terrain && manifest.terrain.enabled ? TERRAIN_ATTR : '' });
-    layer.setData(params, prod, pal, adjustOn());
+    elevMissing = 0;
+    layer.setData(params, prod, pal, adjustOn(), minElevM());
     if (overlay && overlay !== shown) map.removeLayer(overlay);          // superseded before it ever showed
     overlay = layer;
     var swapped = false;
@@ -304,10 +320,24 @@
     box.hidden = !msg; box.textContent = msg;
   }
 
+  /* Status line under the elevation filter. */
+  function elevNote() {
+    var box = $('elevNote');
+    if (!box) return;
+    var msg = '';
+    if (state.minFt > 0) {
+      if (demDown()) msg = 'Elevation tiles could not be loaded, so the filter cannot be applied and the data is hidden.';
+      else if (elevMissing > 0) msg = 'Some elevation tiles failed to load; those parts of the map are hidden while the filter is on.';
+      else msg = 'Showing data only where the ground is at or above ' + state.minFt.toLocaleString('en-US') + ' ft.';
+    }
+    box.hidden = !msg; box.textContent = msg;
+    box.classList.toggle('warn', msg.indexOf('could not') >= 0 || msg.indexOf('failed') >= 0);
+  }
+
   function redraw() {
     var w = curWin(), info = prodInfo();
-    $('validity').textContent = w.length_h + ' h total · valid ' + fmtTime(w.start) + ' → ' + fmtTime(w.end) +
-      (w.n_members ? ' · ' + w.n_members + ' members' + (w.reduced ? ' (reduced ensemble, lower confidence)' : '') : '');
+    $('validity').textContent = w.n_members ? w.n_members + ' ensemble members' + (w.reduced ? ' (reduced ensemble, lower confidence)' : '') : '';
+    elevNote();
     $('thrLabel').textContent = state.prod === 'ice' ? 'Ice accretion at least' : 'Snowfall at least';
     drawLegend();
     Promise.all([loadLayer(w, state.prod), loadTerrainRef()]).then(function (res) {
@@ -333,16 +363,62 @@
     thr.value = state.thr;
   }
 
-  function endButtons() {
-    var box = $('ends'), len = curWin().length_h;
-    box.innerHTML = '';
-    manifest.windows.filter(function (w) { return w.length_h === len; }).forEach(function (w) {
-      var b = document.createElement('button');
-      b.textContent = fmtShort(w.end); b.dataset.id = w.id;
-      if (state.prod === 'ice' && !w.ice_file) b.classList.add('dim');
-      b.onclick = function () { state.win = w.id; syncChips(); redraw(); };
-      box.appendChild(b);
+  /* ---- forecast-step slider: one stop per period of the chosen length, with the exact start / end valid times ---- */
+  function stepPool() { var len = curWin().length_h; return manifest.windows.filter(function (w) { return w.length_h === len; }); }
+  function fmtLocal(iso) {
+    try {
+      return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }).format(utc(iso));
+    } catch (e) { return ''; }
+  }
+  function stepHtml(w, idx, n) {
+    var loc = fmtLocal(w.start);
+    return '<b>Step ' + (idx + 1) + ' of ' + n + '</b> · ' + w.length_h + ' h ending ' + fmtShort(w.end) +
+      '<div class="tm"><span>Start</span> ' + fmtTime(w.start) + '</div><div class="tm"><span>End</span> ' + fmtTime(w.end) + '</div>' +
+      (loc ? '<div class="muted small">Your time: ' + fmtLocal(w.start) + ' → ' + fmtLocal(w.end) + '</div>' : '') +
+      (state.prod === 'ice' && !w.ice_file ? '<div class="muted small">No freezing-rain signal in this period.</div>' : '');
+  }
+  function syncStepper() {
+    var p = stepPool(), cur = curWin(), idx = Math.max(0, p.indexOf(cur)), sl = $('step');
+    sl.max = String(p.length - 1); sl.value = String(idx); sl.disabled = p.length < 2;
+    $('stepPrev').disabled = idx <= 0; $('stepNext').disabled = idx >= p.length - 1;
+    $('stepLabel').innerHTML = stepHtml(cur, idx, p.length);
+    $('tickA').textContent = fmtShort(p[0].end); $('tickB').textContent = p.length > 1 ? fmtShort(p[p.length - 1].end) : '';
+  }
+  var stepTimer = null;
+  function goStep(idx, now) {
+    var p = stepPool(); idx = Math.max(0, Math.min(p.length - 1, idx));
+    $('stepLabel').innerHTML = stepHtml(p[idx], idx, p.length);                  // the label follows the thumb immediately
+    clearTimeout(stepTimer);
+    var go = function () { if (state.win !== p[idx].id) { state.win = p[idx].id; syncChips(); redraw(); } };
+    if (now) go(); else stepTimer = setTimeout(go, 120);                          // while dragging, load only where the thumb rests
+  }
+  function wireStepper() {
+    $('step').oninput = function () { goStep(+$('step').value, false); };
+    $('step').onchange = function () { goStep(+$('step').value, true); };
+    $('stepPrev').onclick = function () { goStep(stepPool().indexOf(curWin()) - 1, true); };
+    $('stepNext').onclick = function () { goStep(stepPool().indexOf(curWin()) + 1, true); };
+  }
+
+  /* ---- elevation filter: hide the data where the ground (AWS Terrain Tiles) is lower than the entered height in feet ---- */
+  function setMinFt(v, immediate) {
+    v = Math.max(0, Math.min(MAX_FT, Math.round(+v) || 0));
+    if (v === state.minFt) return;
+    state.minFt = v; syncElevChips(); writeHash();
+    redraw();
+  }
+  function syncElevChips() {
+    Array.prototype.forEach.call($('elevChips').children, function (b) { b.classList.toggle('on', +b.dataset.ft === state.minFt); });
+  }
+  function wireElevation() {
+    var ei = $('elevFt'), timer = null;
+    ei.value = state.minFt > 0 ? state.minFt : '';
+    ei.oninput = function () { clearTimeout(timer); timer = setTimeout(function () { setMinFt(ei.value); }, 350); };
+    ei.onchange = function () { clearTimeout(timer); setMinFt(ei.value); ei.value = state.minFt > 0 ? state.minFt : ''; };
+    $('elevClear').onclick = function () { clearTimeout(timer); ei.value = ''; setMinFt(0); };
+    Array.prototype.forEach.call($('elevChips').children, function (b) {
+      b.onclick = function () { clearTimeout(timer); ei.value = b.dataset.ft; setMinFt(+b.dataset.ft); };
     });
+    syncElevChips();
   }
 
   function buildControls() {
@@ -373,6 +449,9 @@
     $('opacity').oninput = function () { [overlay, shown].forEach(function (l) { if (l) l.setOpacity(+$('opacity').value); }); };
     var tOn = !!(manifest.terrain && manifest.terrain.enabled);
     $('terrainBox').hidden = !tOn;
+    $('elevBox').hidden = !tOn;
+    if (tOn) wireElevation(); else state.minFt = 0;
+    wireStepper();
     $('shadeRow').hidden = !(tOn && manifest.terrain.hillshade);
     $('terrainAdj').checked = state.adj; $('shade').checked = state.shade;
     $('terrainAdj').onchange = function () { state.adj = $('terrainAdj').checked; redraw(); };
@@ -384,8 +463,7 @@
   }
   function syncChips() {
     var cur = curWin();
-    endButtons();
-    Array.prototype.forEach.call($('ends').children, function (b) { b.classList.toggle('on', b.dataset.id === state.win); });
+    syncStepper();
     Array.prototype.forEach.call($('lengths').children, function (b) { b.classList.toggle('on', +b.dataset.len === cur.length_h); });
     Array.prototype.forEach.call($('hazards').children, function (b) { b.classList.toggle('on', b.dataset.prod === state.prod); });
     Array.prototype.forEach.call($('products').children, function (b) { b.classList.toggle('on', b.dataset.kind === state.kind); });
@@ -398,19 +476,28 @@
     if (!current) return;
     var i = PWPFCore.lonLatToPixel(latlng.lng, latlng.lat, manifest, mercator);
     if (i < 0) return;
-    var tok = ++readTok;
-    showReadout(latlng, i, null);
-    if (elevationOn()) {
-      elevationAt(latlng).then(function (zp) { if (tok === readTok) showReadout(latlng, i, zp); }, function () { /* keep the plain read-out */ });
+    var tok = ++readTok, filt = state.minFt > 0 && elevationAvail();
+    if (!filt) showReadout(latlng, i, null);                // with the filter on, wait for the elevation: the point may be hidden
+    if (filt || elevationOn()) {
+      elevationAt(latlng).then(function (zp) { if (tok === readTok) showReadout(latlng, i, zp); },
+                               function () { if (tok === readTok) showReadout(latlng, i, null, filt); });     // keep the plain read-out
     }
   }
 
-  function showReadout(latlng, i, zp) {
+  function showReadout(latlng, i, zp, elevFailed) {
     var info = prodInfo(), dec = info.decimals, box = $('readout');
     var FL = Binormal.S_FLOOR, adj = PWPFTerrain.config(manifest.terrain), k = 1;
     var head = '<h2>Point forecast · ' + info.label + '</h2><div class="muted">' + latlng.lat.toFixed(2) + ', ' + latlng.lng.toFixed(2) + '</div>';
     if (current.mode[i] < current.zeroMode && current.hi[i] < current.zeroHi) {
       box.innerHTML = head + '<div class="big">No ' + (state.prod === 'ice' ? 'ice' : 'snow') + ' signal</div>';
+      return;
+    }
+    if (state.minFt > 0 && elevFailed) {
+      box.innerHTML = head + '<div class="big">Elevation unavailable</div><div class="muted small">The ' + state.minFt.toLocaleString('en-US') + ' ft elevation filter cannot be checked here, so the map hides this point.</div>';
+      return;
+    }
+    if (state.minFt > 0 && zp !== null && zp !== undefined && zp < state.minFt * FT2M) {
+      box.innerHTML = head + '<div class="big">Hidden</div><div class="muted">Ground is ' + ftTxt(zp) + ', below your ' + state.minFt.toLocaleString('en-US') + ' ft elevation filter.</div>';
       return;
     }
     var adjusting = zp !== null && zp !== undefined && adjustHere();
@@ -423,8 +510,8 @@
     var prow = '<tr><th>Pctile</th>' + r.pcts.map(function (p) { return '<td>' + p[0] + '</td>'; }).join('') + '</tr>' +
       '<tr><th>Inches</th>' + r.pcts.map(function (p) { return '<td>' + p[1].toFixed(dec) + '</td>'; }).join('') + '</tr>';
     var terr = (zp === null || zp === undefined) ? ''
-      : adjusting ? '<div class="muted small">Terrain adjustment: ground ' + Math.round(zp) + ' m vs model ' + Math.round(zref[i]) + ' m → snowfall × ' + k.toFixed(2) + '</div>'
-      : '<div class="muted small">Ground ' + Math.round(zp) + ' m' + (zref ? ' (model ' + Math.round(zref[i]) + ' m)' : '') + '</div>';
+      : adjusting ? '<div class="muted small">Terrain adjustment: ground ' + ftTxt(zp) + ' vs model ' + ftTxt(zref[i]) + ' → snowfall × ' + k.toFixed(2) + '</div>'
+      : '<div class="muted small">Ground ' + ftTxt(zp) + (zref ? ' (model ' + ftTxt(zref[i]) + ')' : '') + '</div>';
     box.innerHTML = head + '<div class="big">' + r.mode.toFixed(dec) + ' in <span class="muted small">forecast (mode)</span></div>' + terr +
       '<table>' + rows + '</table><table style="margin-top:8px">' + prow + '</table>' +
       '<div class="muted small" style="margin-top:6px">Chance of at least the amount shown; percentiles are amounts not exceeded with that probability.' +
@@ -451,16 +538,22 @@
     var ll = e.latlng, R = 6378137, tok = ++tipTok;
     var x = R * ll.lng * Math.PI / 180, y = R * Math.log(Math.tan(Math.PI / 4 + ll.lat * Math.PI / 360));
     var z = Math.round(map.getZoom()), cellPx = mercator.px * 256 * Math.pow(2, z) / (2 * HALF) * dprScale();
-    var s = PWPFCore.sampleAt(current, mercator, x, y, cellPx >= 8, adjustOn() ? zref : null);
+    var s = PWPFCore.sampleAt(current, mercator, x, y, cellPx >= 8, adjustOn() ? zref : null), filt = state.minFt > 0 && elevationAvail();
     var inside = PWPFCore.lonLatToPixel(ll.lng, ll.lat, manifest, mercator) >= 0;
     var head = '<div class="ll">' + fmtLat(ll.lat) + ', ' + fmtLng(ll.lng) + '</div>';
     if (!s) {
       tipEl.innerHTML = head + '<div class="val"><small>' + (inside ? 'No ' + (state.prod === 'ice' ? 'ice' : 'snow') + ' signal here' : 'Outside the forecast domain') + '</small></div>';
       tipEl.hidden = false; placeTip(e.containerPoint);
-      if (inside && elevationOn()) elevationAt(ll).then(function (zp) { if (tok === tipTok) { tipEl.innerHTML = head + '<div class="val"><small>No ' + (state.prod === 'ice' ? 'ice' : 'snow') + ' signal here</small></div><div class="terr">Ground ' + Math.round(zp) + ' m</div>'; placeTip(e.containerPoint); } }, function () {});
+      if (inside && elevationOn()) elevationAt(ll).then(function (zp) { if (tok === tipTok) { tipEl.innerHTML = head + '<div class="val"><small>No ' + (state.prod === 'ice' ? 'ice' : 'snow') + ' signal here</small></div><div class="terr">Ground ' + ftTxt(zp) + '</div>'; placeTip(e.containerPoint); } }, function () {});
       return;
     }
-    function draw(zp) {
+    function draw(zp, failed) {
+      if (filt && (failed || (zp !== null && zp < state.minFt * FT2M))) {             // hidden on the map, so no values here either
+        tipEl.innerHTML = head + '<div class="val"><small>' + (failed ? 'Elevation unavailable: hidden by the ' : 'Hidden by the ') + state.minFt.toLocaleString('en-US') + ' ft elevation filter</small></div>' +
+          (failed ? '' : '<div class="terr">Ground ' + ftTxt(zp) + '</div>');
+        tipEl.hidden = false; placeTip(e.containerPoint);
+        return;
+      }
       var info = prodInfo(), prod = product(), FL = Binormal.S_FLOOR, k = 1, adjusting = false;
       if (zp !== null && s.zr !== null && s.pot !== null && s.sl !== null && adjustHere()) {
         k = PWPFTerrain.scale(zp, s.zr, s.sl, s.pot, s.m, PWPFTerrain.config(manifest.terrain)); adjusting = true;
@@ -477,10 +570,14 @@
       if (prod.kind !== 'prob') row('Chance ≥ ' + state.thr + ' in', (100 * Binormal.exceedance(m, s1, s2, state.thr)).toFixed(1) + ' %');
       [10, 50, 90].forEach(function (q) { row(q + 'th percentile', Binormal.percentile(m, s1, s2, q / 100).toFixed(dec) + ' in'); });
       var terr = zp === null ? '' : adjusting
-        ? '<div class="terr">Ground ' + Math.round(zp) + ' m vs model ' + Math.round(s.zr) + ' m → snowfall × ' + k.toFixed(2) + '</div>'
-        : '<div class="terr">Ground ' + Math.round(zp) + ' m' + (s.zr !== null ? ' (model ' + Math.round(s.zr) + ' m)' : '') + '</div>';
+        ? '<div class="terr">Ground ' + ftTxt(zp) + ' vs model ' + ftTxt(s.zr) + ' → snowfall × ' + k.toFixed(2) + '</div>'
+        : '<div class="terr">Ground ' + ftTxt(zp) + (s.zr !== null ? ' (model ' + ftTxt(s.zr) + ')' : '') + '</div>';
       tipEl.innerHTML = head + '<div class="head">' + title + '</div><div class="val">' + sw + bigTxt + '</div><table>' + rows + '</table>' + terr;
       tipEl.hidden = false; placeTip(e.containerPoint);
+    }
+    if (filt) {                                              // the elevation decides whether this point is shown at all
+      elevationAt(ll).then(function (zp) { if (tok === tipTok) draw(zp); }, function () { if (tok === tipTok) draw(null, true); });
+      return;
     }
     draw(null);
     if (elevationOn()) elevationAt(ll).then(function (zp) { if (tok === tipTok) draw(zp); }, function () {});
@@ -500,10 +597,11 @@
     $('toMembers').onclick = function (e) { e.preventDefault(); $('members').scrollIntoView({ behavior: 'smooth', block: 'start' }); };   // (the URL hash is the viewer state)
     $('about').innerHTML = '<b>Notice.</b> ' + m.notice + ' Methodology: multi-model ensemble → QPF (PRISM-downscaled) × precipitation type × SLR → binormal fit (mode = ' +
       m.mode_method + ' forecast, variance from the ensemble). Freezing rain: simplified FRAM ice-to-liquid ratio.' +
-      (m.terrain && m.terrain.enabled ? ' <b>Terrain adjustment</b> (browser-side, optional): snowfall is rescaled at each map pixel for the ground elevation from AWS Terrain Tiles relative to the 2.5 km model terrain — an elevation gradient (+' + Math.round(100 * m.terrain.precip_gradient_per_km) + "%/km, limited) and the rain/snow line at the model snow level; never more than all the liquid falling as snow. These are our assumptions, not part of WPC\'s method." : '') +
-      (m.accumulation ? ' <b>Accumulation</b> (our assumption, not part of WPC\'s method): snow in marginal air (ground wet-bulb above about -1 °C) is reduced, and warm early-season ground melts the first ~' + (m.accumulation.ground_melt_in_per_c).toFixed(2) + ' in per °C of soil temperature of snow.' : '') +
+      (m.terrain && m.terrain.enabled ? ' <b>Terrain adjustment</b> (browser-side, optional): snowfall is rescaled at each map pixel for the ground elevation from AWS Terrain Tiles relative to the model terrain (1.6-mile grid) — an elevation gradient (+' + Math.round(100 * m.terrain.precip_gradient_per_km * FT2M) + "% per 1,000 ft, limited) and the rain/snow line at the model snow level; never more than all the liquid falling as snow. These are our assumptions, not part of WPC\'s method." : '') +
+      (m.accumulation ? ' <b>Accumulation</b> (our assumption, not part of WPC\'s method): snow in marginal air (ground wet-bulb above about 30 °F) is reduced, and warm early-season ground melts the first ~' + (m.accumulation.ground_melt_in_per_c * 5 / 9).toFixed(2) + ' in per °F of soil temperature of snow.' : '') +
       (m.prism_downscale === false ? ' <b>PRISM QPF downscaling was not applied in this build.</b>' : '') + ' Model data: NOAA/NCEP, ECMWF open data (CC-BY-4.0).';
     map = L.map('map', { zoomSnap: 0.25, minZoom: 3, maxZoom: 12 }).fitBounds(m.bounds);
+    L.control.scale({ metric: false, imperial: true, position: 'bottomleft' }).addTo(map);
     setupBasemap();
     buildMembers(); skipNote();
     loadCalibration();

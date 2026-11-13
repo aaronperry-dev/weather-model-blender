@@ -51,6 +51,12 @@ ice:                         # freezing rain: simplified FRAM (Sanders & Barjenb
 ptype:
   snow_sfc_max_c: 1.5        # decision tree (non-NCEP models): assumed thresholds
   frz_aloft_c: 2.0
+  # WPC downscales ptype from the snow level AND a downscaled 2 m temperature.  Here: a grid point only keeps its
+  # model's snow call if the 2 m T, moved to the 2.5 km terrain with this lapse rate, is <= snow_t2m_max_c
+  # (terrain above the 0.5 C wet-bulb level still counts as snow).  Thresholds are our assumptions.
+  t2m_gate: true
+  snow_t2m_max_c: 1.5
+  t2m_lapse_c_per_km: 6.5
 
 slr:
   method: blend              # blend | kuchera | fixed   (NBM SLR isn't reproducible from public weights)

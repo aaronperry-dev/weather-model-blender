@@ -127,7 +127,7 @@ def _decomposition(ptdiag, pt, runs, members, groups, idx_pts, k0, k1):
     out = ["   what makes the snow, per group, mean over the points with NWS >= 0.5 in:",
            "      snow = QPF x snow share x SLR x air efficiency x ground efficiency",
            "      (QPF raw = model liquid before PRISM; PRISM x = downscaling factor; own share = liquid that the model's own",
-           "       precipitation type calls snow; share = also counting terrain above the 0.5 C wet-bulb level as snow;",
+           "       precipitation type calls snow (and, if ptype.t2m_gate, the downscaled surface temperature allows it); share = also counting terrain above the 33 F wet-bulb level as snow;",
            "       air eff = marginal-air accumulation; ground eff = warm-ground melt; both 1.00 when accumulation is off)",
            f"      {'group':<14}{'QPF raw':>8}{'PRISM x':>8}{'QPF in':>8}{'own share':>10}{'share':>7}{'SLR':>6}{'air eff':>8}"
            f"{'gnd eff':>8}{'snow in':>9}{'NWS in':>8}"]

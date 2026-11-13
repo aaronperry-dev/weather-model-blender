@@ -7,7 +7,9 @@ For one 6-h bin of one ensemble member:
   3. wet-bulb snow level each step -> QPF-weighted bin mean
   4. SLR each step -> QPF-weighted bin mean
   5. regrid [QPF, dominant-snow flag, snow level, SLR] to the 2.5 km grid
-  6. PRISM-downscale QPF; final snow mask = native snow  OR  terrain above the snow level
+  6. PRISM-downscale QPF; final snow mask = (native snow AND downscaled 2 m temperature <= ptype.snow_t2m_max_c)
+     OR terrain above the snow level.  The 2 m temperature is the QPF-weighted bin mean, moved from the model's
+     own terrain to the 2.5 km terrain with a lapse rate (WPC: ptype is downscaled from snow level and 2 m T).
   7. snowfall (in) = QPF/25.4 * SLR * mask
 """
 from __future__ import annotations
@@ -85,6 +87,8 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
     wsum = np.zeros(sshape, np.float32)
     sl_acc = np.zeros(sshape, np.float32)
     slr_acc = np.zeros(sshape, np.float32)
+    t2_wacc = np.zeros(sshape, np.float32)      # QPF-weighted 2 m temperature (wet cells)
+    t2_all = np.zeros(sshape, np.float32)       # plain mean 2 m temperature (the fallback in dry cells)
     counts = np.zeros((5,) + sshape, np.int16)
     ice_src = np.zeros(sshape, np.float32) if ice_on else None
 
@@ -92,6 +96,8 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
     for s in steps:
         q = np.clip(np.nan_to_num(s.qpf_mm, nan=0.0), 0.0, None).astype(np.float32)
         qpf += q
+        t2 = np.nan_to_num(s.t2m_c, nan=0.0).astype(np.float32)
+        t2_all += t2
         wet = q > ctx.min_step_qpf_mm
         if not wet.any():
             continue
@@ -113,6 +119,7 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
         slr = slr_step(s.t2m_c, s.levels, s.psfc_hpa, ctx.doy, ctx.slr_cfg)
         sl_acc += q * sl
         slr_acc += q * slr
+        t2_wacc += q * t2
         wsum += q
 
     if float(qpf.max()) <= 0.0:
@@ -123,8 +130,14 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
     sl_bin = np.where(wsum > 0, sl_acc / np.maximum(wsum, 1e-6), SNOW_LEVEL_WARM).astype(np.float32)
     slr_bin = np.where(wsum > 0, slr_acc / np.maximum(wsum, 1e-6), 10.0).astype(np.float32)
 
+    gate = bool(pt.get("t2m_gate", False))
+    t2_bin = np.where(wsum > 0, t2_wacc / np.maximum(wsum, 1e-6), t2_all / max(len(steps), 1)).astype(np.float32)
+    if gate:
+        last = steps[-1]
+        zm = last.z_sfc_m if last.z_sfc_m is not None else surface_height_from_levels(last.psfc_hpa, last.levels)
+        zm = np.nan_to_num(zm, nan=0.0).astype(np.float32)
     has_ice = ice_on and float(ice_src.max()) > 0.0
-    layers = [qpf, native_snow, sl_bin, slr_bin] + ([ice_src] if has_ice else [])
+    layers = [qpf, native_snow, sl_bin, slr_bin] + ([ice_src] if has_ice else []) + ([t2_bin, zm] if gate else [])
     out = regrid(np.stack(layers))
     q2, ns2, sl2, slr2 = out[:4]
     q2 = np.nan_to_num(q2, nan=0.0)
@@ -134,6 +147,10 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
     slr2 = np.nan_to_num(slr2, nan=10.0)
 
     ice2 = np.clip(np.nan_to_num(out[4], nan=0.0), 0.0, None) if has_ice else None
+    native2 = ns2 >= 0.5
+    if gate:
+        t2_dst = out[-2] + float(pt.get("t2m_lapse_c_per_km", 6.5)) * (out[-1] - ctx.terrain_m) / 1000.0    # 2 m T at the 2.5 km terrain
+        native2 = native2 & ~(t2_dst > float(pt.get("snow_t2m_max_c", 1.5)))      # NaN (outside the source grid) does not gate
     if ctx.downscaler is not None:
         r = ctx.downscaler.ratio(ctx.doy, src_dx_km)
         if r is not None:
@@ -141,7 +158,7 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
             if ice2 is not None:
                 ice2 = ice2 * r
 
-    snow_mask = (ns2 >= 0.5) | (ctx.terrain_m > sl2)
+    snow_mask = native2 | (ctx.terrain_m > sl2)
     snow = (q2 / MM_PER_INCH * slr2 * snow_mask).astype(np.float32)
     snow_pre = snow
     if accumulation.active(ctx.accum_cfg):
@@ -152,7 +169,7 @@ def bin_products(steps: list[StepFields], regrid: Regridder, ctx: BinContext,
         aux["q"] = q2.astype(np.float32)
         aux["q0"] = q_raw.astype(np.float32)
         aux["snow_pre"] = snow_pre.astype(np.float32)
-        aux["pot_nat"] = (q2 / MM_PER_INCH * slr2 * (ns2 >= 0.5)).astype(np.float32)      # snow if only the model's own snow type counted
+        aux["pot_nat"] = (q2 / MM_PER_INCH * slr2 * native2).astype(np.float32)      # snow if only the model's own snow type (and, if gated, the 2 m T) counted
     if ice2 is not None:
         if ctx.ice_cfg.get("report", "flat") == "radial":
             ice2 = ice2 * float(ctx.ice_cfg.get("radial_factor", RADIAL_FACTOR))

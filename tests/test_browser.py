@@ -263,3 +263,77 @@ def test_data_stays_visible_when_elevation_tiles_fail_or_hang(page):
     b = page.evaluate(TILES)
     assert b["raw"] >= 4 and b["painted"] > 5000
     assert not page.errors
+
+
+def _set_step(page, v):
+    page.evaluate("(v) => { const e = document.getElementById('step'); e.value = v; e.dispatchEvent(new Event('input')); e.dispatchEvent(new Event('change')); }", v)
+
+
+def test_forecast_step_slider_shows_start_and_end_and_moves_the_map(page):
+    n = page.evaluate("+document.getElementById('step').max") + 1
+    assert n >= 3 and page.evaluate("+document.getElementById('step').value") == 0
+    lab0 = page.inner_text("#stepLabel")
+    assert "Step 1 of %d" % n in lab0 and "START" in lab0.upper() and "END" in lab0.upper() and "Z" in lab0
+    assert page.is_disabled("#stepPrev") and page.is_enabled("#stepNext")
+    h0 = page.evaluate("location.hash")
+    page.click("#stepNext")
+    page.wait_for_timeout(800)
+    lab1 = page.inner_text("#stepLabel")
+    assert "Step 2 of %d" % n in lab1 and lab1 != lab0 and page.evaluate("location.hash") != h0
+    assert page.evaluate("+document.getElementById('step').value") == 1 and page.is_enabled("#stepPrev")
+    _set_step(page, n - 1)                                                                   # the end of the slider
+    page.wait_for_timeout(800)
+    assert "Step %d of %d" % (n, n) in page.inner_text("#stepLabel") and page.is_disabled("#stepNext")
+    assert page.evaluate(TILES)["painted"] >= 0 and not page.errors
+    page.click("#lengths button:has-text('48 h')")                                           # another length: its own set of steps
+    page.wait_for_timeout(800)
+    m48 = page.evaluate("+document.getElementById('step').max") + 1
+    assert "48 h ending" in page.inner_text("#stepLabel") and m48 != n
+
+
+def test_elevation_filter_hides_low_ground_and_is_in_feet(page):
+    _zoom(page, 7)
+    page.wait_for_timeout(2500)
+    full = page.evaluate(TILES)["painted"]
+    assert full > 5000
+    page.fill("#elevFt", "2000")                                                             # the test terrain spans about 330-3600 ft
+    page.wait_for_timeout(3500)
+    part = page.evaluate(TILES)
+    assert 0 < part["painted"] < 0.9 * full and part["layers"] == 1
+    assert "el=2000" in page.evaluate("location.hash") and "2,000 ft" in page.inner_text("#elevNote")
+    page.fill("#elevFt", "20000")
+    page.wait_for_timeout(3500)
+    assert page.evaluate(TILES)["painted"] == 0
+    box = page.locator("#map").bounding_box()
+    page.mouse.move(box["x"] + 600, box["y"] + 400)
+    page.wait_for_selector("#tip:not([hidden])")
+    page.wait_for_timeout(800)
+    assert "Hidden by the 20,000 ft elevation filter" in page.inner_text("#tip")
+    page.click("#elevChips button[data-ft='1000']")                                          # quick value
+    page.wait_for_timeout(3500)
+    assert page.input_value("#elevFt") == "1000" and "on" in page.get_attribute("#elevChips button[data-ft='1000']", "class")
+    mid = page.evaluate(TILES)["painted"]
+    assert 0 < mid and mid >= part["painted"]
+    page.click("#elevClear")
+    page.wait_for_timeout(3500)
+    back = page.evaluate(TILES)["painted"]
+    assert back >= 0.95 * full and "el=" not in page.evaluate("location.hash")
+    page.mouse.move(box["x"] + 600, box["y"] + 400)
+    page.wait_for_timeout(1200)
+    txt = page.inner_text("#tip")
+    import re
+    assert re.search(r"Ground [\d,]+ ft", txt) and not re.search(r"\d m\b", txt)            # feet, not metres
+    assert not page.errors
+
+
+def test_elevation_filter_hides_data_it_cannot_place_when_tiles_fail(page):
+    _zoom(page, 7)
+    page.wait_for_timeout(2000)
+    page.fill("#elevFt", "1000")
+    page.wait_for_timeout(3000)
+    assert page.evaluate(TILES)["painted"] > 0
+    page.context.route("**/elevation-tiles-prod/**", lambda r: r.abort())
+    _zoom(page, 9, 38.0, -98)                                                                # new tiles whose elevation cannot be loaded
+    page.wait_for_timeout(7000)
+    assert page.evaluate(TILES)["painted"] == 0                                              # nothing is shown unfiltered
+    assert page.is_visible("#elevNote") and ("failed" in page.inner_text("#elevNote") or "could not" in page.inner_text("#elevNote"))

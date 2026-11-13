@@ -85,3 +85,22 @@ th:first-child, td:first-child { text-align: left; white-space: nowrap; }
 
 #calib summary { cursor: pointer; padding: 6px 0; }
 pre.calib { overflow-x: auto; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 10px 12px; white-space: pre; }
+
+/* ---- forecast-step slider ---- */
+.stepper { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.stepper button { flex: none; width: 38px; height: 38px; border: 1px solid var(--line); background: #f5f7f9; border-radius: 19px; cursor: pointer; font-size: .9rem; color: var(--ink); }
+.stepper button:hover:not(:disabled) { background: #eaf0f7; }
+.stepper button:disabled { opacity: .35; cursor: default; }
+.stepper input[type=range] { flex: 1; margin: 0; height: 32px; accent-color: var(--accent); }
+.ticks { display: flex; justify-content: space-between; padding: 0 46px; margin-top: -2px; }
+.steplabel { margin-top: 6px; }
+.steplabel .tm { font-variant-numeric: tabular-nums; font-size: .95rem; }
+.steplabel .tm span { display: inline-block; width: 42px; color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .5px; }
+
+/* ---- elevation filter ---- */
+label.elev { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.elevin input { width: 96px; font: inherit; font-size: 1rem; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.linkbtn { border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; font-size: .9rem; text-decoration: underline; padding: 0; }
+#elevChips { margin: 6px 0; }
+#elevChips button { padding: 4px 11px; font-size: .9rem; }
+#elevNote { margin-top: 4px; }

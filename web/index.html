@@ -11,7 +11,7 @@
 <header>
   <div class="titlewrap">
     <h1>Legacy WPC PWPF Redux</h1>
-    <div class="subtitle">Probabilistic snowfall &amp; freezing-rain guidance, rebuilt from public model data in the style of WPC's retired 2.5&nbsp;km PWPF <span class="tag">unofficial</span></div>
+    <div class="subtitle">Probabilistic snowfall &amp; freezing-rain guidance, rebuilt from public model data in the style of WPC's retired 1.6-mile (2.5&nbsp;km) PWPF <span class="tag">unofficial</span></div>
     <div id="runinfo">loading…</div>
   </div>
 </header>
@@ -44,9 +44,15 @@
     <section>
       <h2>Period</h2>
       <div id="lengths" class="chips"></div>
-      <h2 class="sub">Ending</h2>
-      <div id="ends" class="chips"></div>
-      <div id="validity" class="muted"></div>
+      <h2 class="sub">Forecast step</h2>
+      <div class="stepper">
+        <button id="stepPrev" type="button" aria-label="Previous forecast step">&#9664;</button>
+        <input id="step" type="range" min="0" max="0" step="1" value="0" aria-label="Forecast step (period end time)">
+        <button id="stepNext" type="button" aria-label="Next forecast step">&#9654;</button>
+      </div>
+      <div class="ticks muted small"><span id="tickA"></span><span id="tickB"></span></div>
+      <div id="stepLabel" class="steplabel"></div>
+      <div id="validity" class="muted small"></div>
       <div id="skipnote" class="warn small" hidden></div>
       <div id="nodata" class="muted" hidden>No freezing rain in any ensemble member for this period.</div>
     </section>
@@ -63,6 +69,17 @@
       <label id="pctRow" hidden>Percentile
         <select id="pct"></select></label>
       <label>Overlay opacity <input id="opacity" type="range" min="0.2" max="1" step="0.05" value="0.85"></label>
+      <div id="elevBox" hidden>
+        <h2 class="sub">Elevation filter</h2>
+        <label class="elev">Show only ground at or above
+          <span class="elevin"><input id="elevFt" type="number" inputmode="numeric" min="0" max="20000" step="100" placeholder="0"> ft</span>
+          <button id="elevClear" type="button" class="linkbtn">Clear</button></label>
+        <div id="elevChips" class="chips small">
+          <button type="button" data-ft="500">500 ft</button><button type="button" data-ft="1000">1,000 ft</button>
+          <button type="button" data-ft="2000">2,000 ft</button><button type="button" data-ft="3000">3,000 ft</button>
+        </div>
+        <div id="elevNote" class="muted small" hidden></div>
+      </div>
       <div id="terrainBox" hidden>
         <label class="chk"><input type="checkbox" id="terrainAdj" checked> Terrain adjustment (AWS terrain tiles)</label>
         <label class="chk" id="shadeRow"><input type="checkbox" id="shade" checked> Terrain shading</label>

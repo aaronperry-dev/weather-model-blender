@@ -72,6 +72,8 @@
        o.zref     model terrain per cell (m) and o.dem {data, tz, tx, ty, size} the elevation tile covering this map
                   tile (same or a coarser zoom), o.adjust terrain-adjustment config: when all are given the
                   distribution at every pixel is rescaled for the true elevation (see terrain.js scale())
+       o.minElev  optional ground elevation (m): pixels whose ground (from o.dem) is lower are left transparent.  If it is
+                  set but no o.dem is given nothing is drawn (we cannot show data we cannot place above the line).
        o.interp   'auto' | 'bilinear' | 'bicubic'
      Every output pixel interpolates the parameters (bilinear; Catmull-Rom bicubic once a data cell spans >= 8 output
      pixels, i.e. when the grid would otherwise look coarse), applies the terrain factor, evaluates the product and is
@@ -82,23 +84,26 @@
     var prod = o.product, mode = P.mode, lo = P.lo, hi = P.hi, zm = P.zeroMode, zh = P.zeroHi, FL = Binormal.S_FLOOR;
     var dem = o.dem, adj = o.adjust, zref = o.zref, pot = P.pot, sl = P.sl;
     var useAdj = !!(adj && dem && zref && pot && sl);
+    var minE = (typeof o.minElev === 'number' && isFinite(o.minElev)) ? o.minElev : null;
+    if (minE !== null && !dem) return out;
+    var useDem = !!dem && (useAdj || minE !== null);
     var cellPx = merc.px * world / (2 * HALF) * scale;
     var cubic = o.interp === 'bicubic' || (o.interp !== 'bilinear' && cellPx >= 8);
-    var ci = new Int32Array(n), cf = new Float32Array(n), cw = cubic ? new Float32Array(4 * n) : null, du = useAdj ? new Float32Array(n) : null;
+    var ci = new Int32Array(n), cf = new Float32Array(n), cw = cubic ? new Float32Array(4 * n) : null, du = useDem ? new Float32Array(n) : null;
     var wy = new Float32Array(4), wxs = new Float32Array(4), p, q, k;
     var dd = dem ? z - dem.tz : 0, dsc = Math.pow(2, dd);
     for (p = 0; p < n; p++) {
       var g = (((tx * size + (p + 0.5) / scale) / world) * 2 * HALF - HALF - merc.xmin) / merc.px - 0.5, i0 = Math.floor(g);
       ci[p] = i0; cf[p] = g - i0;
       if (cubic) { catmull(g - i0, wxs); for (k = 0; k < 4; k++) cw[4 * p + k] = wxs[k]; }
-      if (useAdj) du[p] = (((tx + (p + 0.5) / n) / dsc) - dem.tx) * dem.size - 0.5;
+      if (useDem) du[p] = (((tx + (p + 0.5) / n) / dsc) - dem.tx) * dem.size - 0.5;
     }
     var first = pal.stops[0], tcfg = adj;
     for (q = 0; q < n; q++) {
       var gy = (merc.ymax - (HALF - ((ty * size + (q + 0.5) / scale) / world) * 2 * HALF)) / merc.px - 0.5;
       var j0 = Math.floor(gy), fy = gy - j0;
       if (j0 < -1 || j0 >= H) continue;
-      var dv = useAdj ? (((ty + (q + 0.5) / n) / dsc) - dem.ty) * dem.size - 0.5 : 0;
+      var dv = useDem ? (((ty + (q + 0.5) / n) / dsc) - dem.ty) * dem.size - 0.5 : 0;
       if (cubic) catmull(fy, wy);
       var j1 = j0 + 1, r0 = j0 >= 0 ? j0 * W : -1, r1 = j1 < H ? j1 * W : -1;
       for (p = 0; p < n; p++) {
@@ -126,13 +131,18 @@
           s2 = (c00 >= 0 ? w00 * hi[c00] : w00 * FL) + (c10 >= 0 ? w10 * hi[c10] : w10 * FL) + (c01 >= 0 ? w01 * hi[c01] : w01 * FL) + (c11 >= 0 ? w11 * hi[c11] : w11 * FL);
         }
         if (m < zm && s2 < zh) continue;                       // no signal here
+        var zp = 0;
+        if (useDem) {
+          zp = Terrain.sample(dem.data, dem.size, du[p], dv);
+          if (minE !== null && zp < minE) continue;            // below the elevation filter: hidden
+        }
         if (useAdj) {
           if (c00 >= 0 && c10 >= 0 && c01 >= 0 && c11 >= 0) {      // cells outside the grid carry no terrain / snow level
             var w0 = (1 - fx) * (1 - fy), w1 = fx * (1 - fy), w2 = (1 - fx) * fy, w3 = fx * fy;
             var zr = w0 * zref[c00] + w1 * zref[c10] + w2 * zref[c01] + w3 * zref[c11];
             var slv = w0 * sl[c00] + w1 * sl[c10] + w2 * sl[c01] + w3 * sl[c11];
             var pt = w0 * pot[c00] + w1 * pot[c10] + w2 * pot[c01] + w3 * pot[c11];
-            var zp = Terrain.sample(dem.data, dem.size, du[p], dv), f = Terrain.scale(zp, zr, slv, pt, m, tcfg);
+            var f = Terrain.scale(zp, zr, slv, pt, m, tcfg);
             m *= f; s1 *= f; s2 *= f;
             if (s1 < FL) s1 = FL; if (s2 < FL) s2 = FL;
           }
