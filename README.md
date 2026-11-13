@@ -105,6 +105,7 @@ All HTTP goes through one polite client (`noaa_http._request`), so no server's r
 | NOMADS / NCEP ftp (`nomads.ncep.noaa.gov`, `ftp(prd).ncep.noaa.gov`) | 120 hits/min per IP, summed over those hosts, HEAD counts like GET ([SCN 21-32](https://www.weather.gov/media/notification/pdf2/scn21-32nomad_changes.pdf)) | ≤ 60 requests/min in total, 2 connections; only used if AWS fails |
 | AWS open-data buckets (NOAA, ECMWF mirror) | none published; S3 answers `503 SlowDown` when a prefix is hammered | ≤ 20 requests/s and 6 connections per NOAA bucket (10 and 4 elsewhere, 3/s and 2 for the ECMWF mirror, which also halves its allowed rate on every 503 (down to 1/8) and creeps back after good answers, and where each `.index` file is fetched once per run instead of once per member; where the IFS byte ranges are fetched by our own resumable downloader: each range is paced, counted and retried with back-off, finished ranges are never fetched twice, even after a switch of mirror); back-off on 503, shared by all threads; if a mirror keeps failing the IFS download moves on to google, azure, then data.ecmwf.int and the failing mirror is tried last from then on; IFS downloads stop after 45 min (`PWPF_IFS_BUDGET_MIN`) so the run still finishes with the members it has; `PWPF_IFS_SOURCE=aws|google|azure|ecmwf` picks the first mirror |
 | ECMWF open data | 500 simultaneous connections | ≤ 2 requests/s; `ecmwf-opendata` retries capped at 3 (library default is 500 × 120 s) |
+| NOHRSC snowfall analysis (`www.nohrsc.noaa.gov`) | none published | one connection, ≤ 1 request/s, a 2 MB file is downloaded once and cached; at most `verification.max_fetch_per_run` (40) downloads per run; a period whose file is not there yet (404) is retried on later runs only, and abandoned after `max_tries` (6) |
 | PRISM | refuses a file downloaded twice within 24 h | one request every 2 s, one connection, files streamed to disk once, a ledger refuses to re-request a file inside 24 h, raw files cached between workflow runs |
 
 On `429`/`503` (and `403` from NCEP, whose firewall blocks over-limit IPs; but see the availability probes below) it honours `Retry-After` or backs off
@@ -178,6 +179,7 @@ pwpf_blender/            Python package
   pipeline.py            members → 6-h bins → rolling 24/48/72 h windows (snow + ice)
   export.py              Web-Mercator .bin.gz data layers (PWPB format), manifest.json, npz
   sources/               synthetic (tests/demo) and live loaders
+  nohrsc.py verify.py recalibrate.py   NOHRSC analysis download/decode, scoring ledger, calibration fit
   validate.py external.py static_data.py cli.py
 web/                     static viewer: Leaflet UI (app.js), DOM-free logic (core.js, binormal.js, bin.js, terrain.js)
 config/pwpf.yaml         members, science settings, profiles (lite, synthetic)
@@ -244,7 +246,23 @@ This is **our own addition, not part of WPC's published method**. Fresh-fallen s
 1. **Marginal-air efficiency** (per 6-h bin, per member). The ground wet-bulb is estimated as `0.5 °C + wb_lapse_c_per_km × (snow level − terrain)/1000`. Efficiency is 1.0 at or below `wb_full_c` (−1 °C) and falls linearly to `min_eff` (0.25) at or above `wb_zero_c` (+1.5 °C). It multiplies snow, not QPF.
 2. **Warm-ground melt.** A soil-temperature climatology (latitude, day of year, −6.5 °C/km with elevation, floored at 0) sets a snow depth that is lost first: `ground_melt_in_per_c × T_soil` inches (about 1 in at 43 N on 12 Nov, near 0 by January). It is applied to each member's *running total*, so the 24/48/72-h windows still telescope (a 72-h total equals the sum of its 24-h parts).
 
-Set `accumulation.enabled: false` to switch both off. The manifest records the settings, and the dashboard About text mentions them when active. The calibration table gains **air eff** and **gnd eff** columns so you can see how much each term removed at the reference towns versus NWS. All parameters are assumptions, not fitted values; tune them against that table.
+**Default: off** (`accumulation.enabled: false`), because the legacy WPC method has no such term. Switch it on with `enabled: true` or for a single A/B build with the workflow input `accumulation: on` / `--accumulation on`, and let the NOHRSC verification below tell the two runs apart (each run is archived with a fingerprint of its settings). Set `enabled: false` to switch both off. The manifest records the settings, and the dashboard About text mentions them when active. The calibration table gains **air eff** and **gnd eff** columns so you can see how much each term removed at the reference towns versus NWS. All parameters are assumptions, not fitted values; tune them against that table.
+
+### Verification and calibration against NOHRSC
+
+WPC calibrates the PWPF probabilities statistically against the NOHRSC snowfall analysis, so the same data is used here, in three steps (`pwpf_blender/nohrsc.py`, `verify.py`, `recalibrate.py`; config block `verification:`):
+
+1. **Archive.** Every run (`run --archive-dir archive`, set in the workflow) stores the *raw* (uncalibrated) 24 h mode / sigma_low / sigma_high of its cycle together with a fingerprint and a readable label of the science settings (accumulation, ptype gate, SLR, mode method, grid stride). The archive lives in a rolling GitHub Actions cache (`archive/`, `nohrsc_cache/`), 14 days of fields.
+2. **Verify** (`verify-archive`, workflow step after the build, `continue-on-error`). Each archived 24 h period whose end is more than `obs_latency_h` (3 h) in the past is scored once against `https://www.nohrsc.noaa.gov/snowfall_v2/data/<yyyymm>/sfav2_CONUS_24h_<yyyymmddhh>_grid184.grb2` (the file is on the same 2.5 km NDFD grid; metres, 9999 = no analysis). Scores are additive counts kept in `archive/ledger.json`: bias / MAE / RMSE and correlation for the mode and the median, POD / FAR / CSI / frequency bias at 0.1, 1, 2, 4 and 6 in, how often the analysis falls below our 10th / 50th / 90th percentile, Brier skill and reliability bins for P(≥1 in) and P(≥4 in), and a PIT histogram. They are written to `site/data/verification.txt` / `verification.json` (also in the `fields-npz` artifact) grouped **by settings fingerprint**, so an A/B of two builds is two blocks in the same table. Small analysed amounts are uncertain; read the 0.1 in scores accordingly.
+3. **Calibrate** (`recalibrate.py`). From the pooled forecast/analysis pairs (6000 forecast-selected wet cells per period, kept 180 days, only pairs made with the *current* settings) three factors are fitted by minimising the quantile loss: `mode × a`, `sigma_low × k_lo`, `sigma_high × k_hi`, so the result is still a binormal and the viewer needs no change. The fit is always printed and written to `archive/calibration_fit.json`; it is **applied to the products only if** `verification.apply_calibration: true`, at least `min_cases` (8) independent cycles went into it, it improves the loss by ≥ 1 %, and its fingerprint equals the run's. The archive always holds the uncalibrated fields, so applying never feeds back into the next fit. Default is advisory only.
+
+Manual use:
+
+```
+python -m pwpf_blender nohrsc --valid 2026111312                  # download + decode one analysis, print a summary
+python -m pwpf_blender verify --npz fields_2026111212.npz         # score a --save-npz file period by period (+ town table)
+python -m pwpf_blender verify-archive --archive archive --now 2026-11-20T00:00   # back-fill / re-score
+```
 
 ### Calibration report
 Every run ends with a `=== calibration report ===` block in the log (`calibration:` in `config/pwpf.yaml`): for the 72-h period and the 24-h period ending 30 h after the cycle it prints, for a Northeast box, the percentage of area at or above 0.1/1/2/4/6/12 in plus mean, 99th percentile and maximum - for the blended mode, the blended 50th percentile, the plain member mean, and **each model group on its own** - and, for the 72-h period, our value at ~24 reference towns next to the NWS WFO "expected snowfall" labels read off the official maps (`pwpf_blender/calibration.py`; edit the list for another event). It shows at a glance whether the blend is high or low against the official forecasts and which model group drives it, before any SLR / mode / QPF knob is touched. The browser-side terrain adjustment is not included.
@@ -270,7 +288,7 @@ publishes them). Basemap © OpenStreetMap contributors © CARTO. Terrain tiles (
 
 ## Roadmap
 SREF loader · NBM SLR / snow-level percentiles as optional inputs · ice (freezing-rain) products
-using the simplified FRAM ILR · per-pixel NaN handling at CAM domain edges · automatic WPC-file download in `validate`.
+using the simplified FRAM ILR · per-pixel NaN handling at CAM domain edges · automatic WPC-file download in `validate` · verification link in the viewer.
 
 
 *Colours:* snowfall amounts use the NWS "Expected Snowfall" ramp; probabilities use ColorBrewer YlGnBu; basemaps are keyless (Esri light gray by default, OSM / USGS Topo selectable, with automatic fallback).

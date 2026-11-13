@@ -35,7 +35,7 @@ snow_level:
   wetbulb_c: 0.5             # PWPF: 0.5 degC wet-bulb surface
 
 accumulation:                # NOT in WPC's published recipe: how much of the falling snow accumulates (see README "Accumulation")
-  enabled: true
+  enabled: false             # off = closest to WPC's published method; the A/B run (--accumulation on) is verified against NOHRSC
   wb_full_c: -1.0            # ground wet-bulb at or below this: all snow accumulates
   wb_zero_c: 1.5             # ... at or above this: only min_eff of it does (linear in between)
   min_eff: 0.25
@@ -78,9 +78,23 @@ mode:                        # stand-in for the human-edited WWD forecast
 
 calibration:                 # end-of-run report in the log: Northeast box statistics per model group + NWS reference points
   enabled: true
-  windows: [s72_f072, s24_f030]
+  windows: [s72_f072, s24_f024, s24_f030, s24_f036]
   # box: {lat: [40, 47], lon: [-80, -67]}
   # points: [[name, lat, lon, nws_72h_in], ...]   (defaults: pwpf_blender/calibration.py REFERENCE_POINTS)
+
+# NOHRSC verification + calibration (python -m pwpf_blender verify-archive; see README "Verification and calibration").  WPC calibrates
+# the PWPF probabilities against the NOHRSC snowfall analysis; we archive each run's raw 24 h fields, score them once NOHRSC has
+# published the analysis, and fit three scale factors (mode, lower spread, upper spread) from the pooled pairs.
+verification:
+  enabled: true
+  obs_latency_h: 3           # wait this long after a period ends before asking NOHRSC for its analysis
+  archive_days: 14           # raw forecast fields (and downloaded analyses) are kept this long
+  pair_keep_days: 180        # forecast/observation samples used for the calibration fit
+  pairs_per_window: 6000
+  max_fetch_per_run: 40      # at most this many NOHRSC downloads per run (1 request/s, one connection)
+  max_tries: 6               # give up on a period whose analysis never appears
+  min_cases: 8               # independent cycles needed before a calibration fit may be used
+  apply_calibration: false   # true = scale the products with the fit (only when it matches the current science settings)
 
 static:
   terrain: static/terrain_2p5km.npy          # made by `prepare-static`

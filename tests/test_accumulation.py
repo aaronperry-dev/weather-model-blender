@@ -61,7 +61,9 @@ def test_marginal_air_reduces_snow_but_cold_high_ground_is_untouched():
 
 
 def test_pipeline_switch_and_manifest(tmp_path):
-    cfg = load_config(CFG, "synthetic", {"grid": {"stride": 8}, "workers": 2, "member_failure_limit": 2})
+    assert load_config(CFG)["accumulation"]["enabled"] is False                       # default: closest to WPC's published method
+    cfg = load_config(CFG, "synthetic", {"grid": {"stride": 8}, "workers": 2, "member_failure_limit": 2,
+                                         "accumulation": {"enabled": True}})
     grid = GridSpec.ndfd_2p5km(8)
     lon, lat = grid.lonlat()
     terr, prism = synthetic_terrain(lon, lat), synthetic_prism(lon, lat)

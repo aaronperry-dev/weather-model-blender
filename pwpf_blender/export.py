@@ -262,6 +262,7 @@ def write_site(results, cfg: dict, outdir: str | Path) -> Path:
         "slr": cfg.get("slr", {}),
         "accumulation": ({k: v for k, v in __import__("pwpf_blender.accumulation", fromlist=["x"]).settings(cfg.get("accumulation")).items()}
                          if (cfg.get("accumulation") or {}).get("enabled", True) else None),
+        "calibration_applied": results.meta.get("calibration_applied"),
         "grid_stride": results.grid.stride,
         "prism_downscale": bool(results.meta.get("prism_downscale", False)),
         "notice": "Unofficial guidance built from public WPC PWPF documentation. Not a National Weather Service product.",

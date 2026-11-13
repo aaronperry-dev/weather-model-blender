@@ -54,6 +54,8 @@ def cmd_run(a):
         overrides["workers"] = a.workers
     if a.slr_adjust is not None:
         overrides["slr"] = {"adjust": a.slr_adjust}
+    if a.accumulation:
+        overrides["accumulation"] = {"enabled": a.accumulation == "on"}
     cfg = load_config(a.config, "synthetic" if a.synthetic else a.profile, overrides)
     grid = GridSpec.ndfd_2p5km(cfg["grid"]["stride"])
     terrain, prism = _load_static(cfg, grid, a.synthetic)
@@ -67,11 +69,64 @@ def cmd_run(a):
     logging.info("grid %dx%d (stride %d), cycle %s", grid.nx, grid.ny, grid.stride, cycle)
     pipe = Pipeline(cfg, grid, terrain, prism, ext)
     res = pipe.run(cycle)
+    if a.archive_dir:                                  # raw fields first: the archive must never contain calibrated products
+        from . import verify
+        verify.archive_results(res, cfg, a.archive_dir)
+        vc = verify.settings(cfg.get("verification"))
+        if vc["apply_calibration"]:
+            from . import recalibrate
+            logging.info("%s", recalibrate.apply(res, Path(a.archive_dir) / "calibration_fit.json", verify.fingerprint(cfg)[0]))
     out = Path(a.out)
     mf = write_site(res, cfg, out)
     if a.save_npz:
         save_npz(res, out.parent / f"fields_{cycle:%Y%m%d%H}.npz")
     print(f"wrote {mf}  ({res.meta['n_members']} members)")
+
+
+def cmd_nohrsc(a):
+    from . import nohrsc
+    valid = datetime.strptime(a.valid, "%Y%m%d%H")
+    p = nohrsc.fetch(valid, a.hours, a.cache)
+    if p is None:
+        sys.exit(f"NOHRSC has not published the {a.hours} h analysis ending {valid:%Y-%m-%d %H}Z")
+    g = nohrsc.read_grib(p)
+    v = g["inches"][np.isfinite(g["inches"])]
+    print(f"{p}: valid {g['valid']:%Y-%m-%d %H}Z, {g['hours']} h, {v.size} analysed cells, mean {v.mean():.3f} in, max {v.max():.1f} in")
+
+
+def cmd_verify(a):
+    from . import verify
+    print(verify.case_report(a.npz, a.window, a.cache, towns=not a.no_towns))
+
+
+def cmd_verify_archive(a):
+    from . import recalibrate, verify
+    cfg = load_config(a.config, a.profile)
+    vc = verify.settings(cfg.get("verification"))
+    if not vc["enabled"]:
+        print("verification disabled in the config")
+        return
+    arch = Path(a.archive)
+    now = datetime.fromisoformat(a.now).replace(tzinfo=None) if a.now else None
+    led = verify.verify_archive(cfg, arch, a.cache, now=now)
+    js, txt = verify.summarize(led, now)
+    fp, fd = verify.fingerprint(cfg)
+    fitr = recalibrate.fit(arch, fp, min_cycles=int(vc["min_cases"]))
+    recalibrate.write_fit(fitr, arch / "calibration_fit.json")
+    js["calibration_fit"] = fitr
+    txt += "\n" + recalibrate.describe(fitr) + "\n" + (
+        "(applied to the products)" if vc["apply_calibration"] else "(advisory: set verification.apply_calibration: true to apply it)") + "\n"
+    print(txt)
+    if a.out:
+        out = Path(a.out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "verification.txt").write_text(txt)
+        (out / "verification.json").write_text(json.dumps(js, indent=1, default=float))
+        mf = out / "manifest.json"
+        if mf.exists():
+            m = json.loads(mf.read_text())
+            m["verification"] = "verification.txt"
+            mf.write_text(json.dumps(m, indent=1))
 
 
 def cmd_prepare(a):
@@ -134,7 +189,28 @@ def main(argv=None):
     r.add_argument("--save-npz", action="store_true", help="also write full-precision fields next to --out")
     r.add_argument("--external-snow", default=None, help="NDFD snow GRIB2 to use as the mode")
     r.add_argument("--slr-adjust", type=float, default=None)
+    r.add_argument("--accumulation", choices=["on", "off"], default=None, help="override accumulation.enabled (A/B runs)")
+    r.add_argument("--archive-dir", default=None, help="store the raw 24 h fields here for NOHRSC verification/calibration")
     r.set_defaults(fn=cmd_run)
+    n = sub.add_parser("nohrsc", help="download + decode one NOHRSC snowfall analysis GRIB2 and print its summary")
+    n.add_argument("--valid", required=True, help="end of the period, UTC, yyyymmddhh")
+    n.add_argument("--hours", type=int, default=24)
+    n.add_argument("--cache", default="nohrsc_cache")
+    n.set_defaults(fn=cmd_nohrsc)
+    vv = sub.add_parser("verify", help="score a fields_*.npz against NOHRSC (24 h periods that have ended)")
+    vv.add_argument("--npz", required=True)
+    vv.add_argument("--window", nargs="*", default=None, help="period ids (default: all 24 h periods)")
+    vv.add_argument("--cache", default="nohrsc_cache")
+    vv.add_argument("--no-towns", action="store_true")
+    vv.set_defaults(fn=cmd_verify)
+    va = sub.add_parser("verify-archive", help="score archived cycles against NOHRSC, update the ledger, fit the calibration")
+    va.add_argument("--config", default="config/pwpf.yaml")
+    va.add_argument("--profile", default=None)
+    va.add_argument("--archive", default="archive")
+    va.add_argument("--cache", default="nohrsc_cache")
+    va.add_argument("--out", default=None, help="site data dir to receive verification.txt/.json")
+    va.add_argument("--now", default=None, help="ISO UTC time to act as 'now' (back-fill / testing)")
+    va.set_defaults(fn=cmd_verify_archive)
     s = sub.add_parser("prepare-static", help="fetch terrain + PRISM normals onto the 2.5 km grid")
     s.add_argument("--out", default="static")
     s.add_argument("--terrain-npy", default=None)

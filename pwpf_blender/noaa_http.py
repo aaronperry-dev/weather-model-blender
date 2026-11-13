@@ -218,6 +218,8 @@ def policy_for(url: str) -> Policy:
         key, mk = "ncep", lambda: Policy("ncep", 1.0, 3, 2, (429, 503, 403))
     elif host in _PRISM_HOSTS:
         key, mk = "prism", lambda: Policy("prism", 0.5, 1, 1)
+    elif host.endswith("nohrsc.noaa.gov"):            # NOHRSC snowfall analysis: ~2 MB files, a handful per run; one at a time
+        key, mk = "nohrsc", lambda: Policy("nohrsc", 1.0, 2, 1)
     elif host == "dd.weather.gc.ca":                  # MSC Datamart (no published rate limit): stay modest
         key, mk = "msc", lambda: Policy("msc", 2.0, 4, 2)
     elif host.startswith("ecmwf-forecasts.s3"):       # ECMWF open-data mirror: answered 503 under 4 parallel pulls
