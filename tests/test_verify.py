@@ -182,7 +182,7 @@ def test_archive_keeps_only_24h_windows_and_prunes(tmp_path):
     verify.archive_results(_fake_results(old), cfg, tmp_path)
     new = datetime(2026, 11, 12, 12)
     p = verify.archive_results(_fake_results(new), cfg, tmp_path)
-    assert not (tmp_path / "fc_2026100100.npz").exists()         # older than archive_days
+    assert not list(tmp_path.glob("fc_2026100100_*.npz"))         # older than archive_days
     z = np.load(p)
     meta = json.loads(str(z["meta"]))
     assert sorted(meta["windows"]) == ["s24_f024", "s24_f030"] and "s72_f072_mode" not in z.files
@@ -205,9 +205,9 @@ def test_verify_archive_scores_due_periods_once(tmp_path, monkeypatch):
     assert [c["window"] for c in led["cases"]] == ["s24_f024"] and len(calls) == 1
     led = verify.verify_archive(cfg, tmp_path / "arch", tmp_path / "cache", now=cycle + timedelta(hours=40))   # f030 due, not published
     assert [c["window"] for c in led["cases"]] == ["s24_f024"]
-    assert led["missing"] == {"2026-11-12T12:00:00|s24_f030": 1}
+    assert list(led["missing"].values()) == [1] and list(led["missing"])[0].startswith("2026-11-12T12:00:00|s24_f030|")
     led = verify.verify_archive(cfg, tmp_path / "arch", tmp_path / "cache", now=cycle + timedelta(hours=60))
-    assert led["missing"] == {"2026-11-12T12:00:00|s24_f030": 2}
+    assert list(led["missing"].values()) == [2]
     assert len(calls) == 3                                          # f024 once, f030 twice - f024 never fetched again
     assert (tmp_path / "arch" / "pairs").glob("pairs_*.npz")
     c = led["cases"][0]
@@ -290,10 +290,13 @@ def test_run_cli_archives_raw_fields_and_accumulation_switch(tmp_path, monkeypat
     argv = ["run", "--config", str(CFG), "--synthetic", "--cycle", "2026-01-15T12", "--stride", "12", "--workers", "2",
             "--out", str(out), "--archive-dir", str(tmp_path / "arch"), "--accumulation", "on"]
     cli.main(argv)
-    meta = json.loads(str(np.load(tmp_path / "arch" / "fc_2026011512.npz")["meta"]))
+    (f1,) = (tmp_path / "arch").glob("fc_2026011512_*.npz")
+    meta = json.loads(str(np.load(f1)["meta"]))
     assert "accumulation on" in meta["label"] and meta["windows"]
     cli.main(argv[:-1] + ["off"])
-    meta2 = json.loads(str(np.load(tmp_path / "arch" / "fc_2026011512.npz")["meta"]))
+    assert len(list((tmp_path / "arch").glob("fc_2026011512_*.npz"))) == 2          # A/B of one cycle: both kept
+    (f2,) = [f for f in (tmp_path / "arch").glob("fc_2026011512_*.npz") if f != f1]
+    meta2 = json.loads(str(np.load(f2)["meta"]))
     assert "accumulation off" in meta2["label"] and meta2["fingerprint"] != meta["fingerprint"]
     mf = json.loads((out / "manifest.json").read_text())
     assert mf["accumulation"] is None and mf["calibration_applied"] is None
@@ -313,3 +316,18 @@ def test_verify_archive_cli_writes_reports(tmp_path, monkeypatch, capsys):
     js = json.loads((out / "verification.json").read_text())
     assert js["groups"] and js["calibration_fit"]["usable"] is False
     assert json.loads((out / "manifest.json").read_text())["verification"] == "verification.txt"
+
+
+def test_ab_runs_of_one_cycle_are_scored_separately(tmp_path, monkeypatch):
+    cycle = datetime(2026, 11, 12, 12)
+    cfg_off = load_config(CFG, "synthetic")
+    cfg_on = load_config(CFG, "synthetic", {"accumulation": {"enabled": True}})
+    verify.archive_results(_fake_results(cycle), cfg_off, tmp_path / "arch")
+    verify.archive_results(_fake_results(cycle, scale=0.7), cfg_on, tmp_path / "arch")
+    obs_full = np.kron(_field(scale=0.6)[2], np.ones((STRIDE, STRIDE), np.float32))[:1377, :2145]
+    monkeypatch.setattr(verify.nohrsc, "load", lambda *a, **k: obs_full)
+    led = verify.verify_archive(cfg_off, tmp_path / "arch", tmp_path / "c", now=cycle + timedelta(hours=60))
+    assert len(led["cases"]) == 4 and len({c["fingerprint"] for c in led["cases"]}) == 2
+    txt = verify.summarize(led)[1]
+    assert "accumulation off" in txt and "accumulation on" in txt
+    assert len(list((tmp_path / "arch" / "pairs").glob("pairs_*.npz"))) == 4

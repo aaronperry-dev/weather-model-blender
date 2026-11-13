@@ -88,11 +88,11 @@ def archive_results(res, cfg: dict, archive_dir: str | Path) -> Path | None:
     arrs["meta"] = np.array(json.dumps({"cycle": res.cycle.isoformat(), "stride": res.grid.stride, "windows": wins,
                                          "fingerprint": fp, "settings": fd, "label": label_of(fd),
                                          "n_members": res.meta.get("n_members")}, default=str))
-    path = d / f"fc_{res.cycle:%Y%m%d%H}.npz"
+    path = d / f"fc_{res.cycle:%Y%m%d%H}_{fp}.npz"          # one file per cycle AND settings, so A/B builds of a cycle coexist
     np.savez_compressed(path, **arrs)
-    for f in d.glob("fc_??????????.npz"):
+    for f in d.glob("fc_??????????_*.npz"):
         try:
-            t = datetime.strptime(f.stem[3:], "%Y%m%d%H")
+            t = datetime.strptime(f.stem[3:13], "%Y%m%d%H")
         except ValueError:
             continue
         if res.cycle - t > timedelta(days=vc["archive_days"]):
@@ -219,19 +219,19 @@ def verify_archive(cfg: dict, archive_dir: str | Path, cache_dir: str | Path, no
     now = now or _utcnow()
     arch = Path(archive_dir)
     led = load_ledger(arch / "ledger.json")
-    done = {(c["cycle"], c["window"]) for c in led["cases"]}
+    done = {(c["cycle"], c["window"], c["fingerprint"]) for c in led["cases"]}
     fetched = 0
     (arch / "pairs").mkdir(parents=True, exist_ok=True)
-    for f in sorted(arch.glob("fc_??????????.npz")):
+    for f in sorted(arch.glob("fc_??????????_*.npz")):
         z = np.load(f, allow_pickle=False)
         meta = json.loads(str(z["meta"]))
         stride = int(meta["stride"])
         for wid, (_, end) in sorted(meta["windows"].items(), key=lambda kv: kv[1][1]):
-            key = (meta["cycle"], wid)
+            key = (meta["cycle"], wid, meta["fingerprint"])
             end_t = datetime.fromisoformat(end)
             if key in done or now < end_t + timedelta(hours=vc["obs_latency_h"]):
                 continue
-            mk = f"{meta['cycle']}|{wid}"
+            mk = f"{meta['cycle']}|{wid}|{meta['fingerprint']}"
             if led["missing"].get(mk, 0) >= vc["max_tries"] or fetched >= vc["max_fetch_per_run"]:
                 continue
             try:
@@ -255,7 +255,7 @@ def verify_archive(cfg: dict, archive_dir: str | Path, cache_dir: str | Path, no
             done.add(key)
             led["missing"].pop(mk, None)
             pr = sample_pairs(m, lo, hi, obs, int(vc["pairs_per_window"]))
-            np.savez_compressed(arch / "pairs" / f"pairs_{meta['cycle'][:13].replace('-', '').replace('T', '')}_{wid}.npz",
+            np.savez_compressed(arch / "pairs" / f"pairs_{meta['cycle'][:13].replace('-', '').replace('T', '')}_{wid}_{meta['fingerprint']}.npz",
                                 mode=pr[0].astype(np.float16), s_lo=pr[1].astype(np.float16), s_hi=pr[2].astype(np.float16),
                                 obs=pr[3].astype(np.float16),
                                 meta=np.array(json.dumps({"fingerprint": meta["fingerprint"], "cycle": meta["cycle"],
